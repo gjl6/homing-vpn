@@ -1,6 +1,6 @@
 # 归途（Homing）网关服务栈
 #
-# 一个镜像（homing:1.0.0）包含全部组件，靠 command 选择角色：
+# 一个镜像（homing:1.1.0）包含全部组件，靠 command 选择角色：
 #   core   隧道核心（内核隧道 + NAT + 客户端管理 API）
 #   stun   打洞 / 中继
 #   admin  管理台（:51822，自带账户 / 2FA）
@@ -14,8 +14,8 @@
 # 代价：core 需要 privileged 来写宿主机 /proc/sys（host 网络下 Docker 不允许
 # 通过 sysctls 设置 net.*），iptables 规则也直接写在宿主机命名空间。
 #
-# 配置见 .env（从 .env.example 复制）。
-#   docker compose build
+# 数据目录统一为 ./data（可用 HOMING_DATA_DIR 覆盖）；所有状态文件都在里面。
+# 配置见 .env（全部可选，从 .env.example 复制即可）：
 #   docker compose up -d
 # 可选出口：
 #   docker compose --profile egress up -d homing-egress [homing-proxy]
@@ -50,13 +50,15 @@ services:
       - "-port"
       - "${CORE_PORT:-51820}"
       - "-dns"
-      - "${CORE_DNS:-192.168.1.1}"
+      - "${CORE_DNS:-}"
+      - "-v4cidr"
+      - "${CLIENT_NET:-}"
       - "-reconcile"
       - "10s"
       - "-probe-port"
       - "${PROBE_PORT:-51824}"
     volumes:
-      - ./core-data:/data
+      - ${HOMING_DATA_DIR:-./data}:/data
       - /lib/modules:/lib/modules:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:51821/healthz || exit 1"]
@@ -71,8 +73,8 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
-  # 自研 STUN 打洞 / 中继（host 网络，直接拿真实公网映射）
-  # 端口：51830/udp 打洞入口，51831/tcp 状态接口（仅本机），18081/tcp 自检页
+  # 打洞 / 中继（host 网络，直接拿真实公网映射）
+  # 端口：打洞入口默认随机（可在管理台设置），51831/tcp 状态接口（仅本机），18081/tcp 自检页
   # ---------------------------------------------------------------------------
   homing-stun:
     image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
@@ -86,15 +88,18 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - ./stun-data:/stun-data
+      - ${HOMING_DATA_DIR:-./data}:/data
     command:
       - "stun"
-      - "-listen"
-      - ":51830"
       - "-target"
       - "127.0.0.1:${CORE_PORT:-51820}"
+      # 空 = 读取 /data/settings.json 的 stunPort（0=随机）
+      - "-listen"
+      - "${STUN_PORT:-}"
       - "-state-file"
-      - "/stun-data/endpoint.json"
+      - "/data/stun/endpoint.json"
+      - "-config-file"
+      - "/data/stun/config.json"
       - "-http"
       - "127.0.0.1:51831"
       - "-public-http"
@@ -113,8 +118,9 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
-  # 自研管理台（:51822）：栈状态 + 客户端管理 + 公告板发布；自带登录 + TOTP 2FA
-  # 需要 docker CLI / compose 来重建出口容器，所以挂载 docker.sock
+  # 管理台（:51822）：栈状态 + 客户端管理 + 公告板发布 + 系统默认值；自带登录 + TOTP 2FA
+  # 需要 docker CLI / compose 来重建出口容器，所以挂载 docker.sock 和部署目录。
+  # VPN_HOST_DIR 不再需要：管理台通过 compose 标签自动探测宿主机部署路径。
   # ---------------------------------------------------------------------------
   homing-admin:
     image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
@@ -129,20 +135,22 @@ services:
     network_mode: host
     command: ["admin"]
     volumes:
-      - ./stun-data:/stun-data
-      - ${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}:/vpn
-      - ${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}:${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}
+      - ${HOMING_DATA_DIR:-./data}:/data
+      # 部署目录挂到容器内固定路径，供管理台读取 compose/.env 并执行 docker compose
+      - .:/vpn
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      VPN_DIR: "${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?请在 .env 设置 ADMIN_PASSWORD}"
+      DATA_DIR: "/data"
+      VPN_DIR: "/vpn"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
       ADMIN_LISTEN: "${ADMIN_LISTEN:-:51822}"
       CORE_BASE: "http://127.0.0.1:51821"
       STUN_STATUS: "http://127.0.0.1:51831"
-      CORE_LAN: "${CORE_LAN:-192.168.1.0/24}"
-      CORE_DNS: "${CORE_DNS:-192.168.1.1}"
+      # 全部可选；留空时管理台自动探测/使用默认值
+      CORE_LAN: "${CORE_LAN:-}"
+      CORE_DNS: "${CORE_DNS:-}"
       CORE_PORT: "${CORE_PORT:-51820}"
-      CLIENT_NET: "${CLIENT_NET:-10.8.0.0/24}"
+      CLIENT_NET: "${CLIENT_NET:-}"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:$${ADMIN_LISTEN##*:}/healthz || exit 1"]
       interval: 20s
@@ -182,7 +190,7 @@ services:
     privileged: true
     command: ["plumb"]
     volumes:
-      - ./stun-data:/stun-data
+      - ${HOMING_DATA_DIR:-./data}:/data
     stop_grace_period: 10s
     logging:
       driver: json-file
@@ -192,7 +200,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # 可选：remote 出口的本机透明代理（profile: egress）
-  # 管理台生成 /stun-data/proxy/config.yaml 后启动；需要 TUN + host 网络。
+  # 管理台生成 /data/proxy/config.yaml 后启动；需要 TUN + host 网络。
   # ---------------------------------------------------------------------------
   homing-proxy:
     image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
@@ -209,7 +217,7 @@ services:
     privileged: true
     command: ["proxy"]
     volumes:
-      - ./stun-data:/stun-data
+      - ${HOMING_DATA_DIR:-./data}:/data
     stop_grace_period: 5s
     logging:
       driver: json-file

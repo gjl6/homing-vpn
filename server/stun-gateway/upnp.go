@@ -62,14 +62,10 @@ func upnpLoop() {
 	}
 }
 
+// localListenPort 返回实际绑定的本地 UDP 端口（-listen 为 :0 时由内核分配，
+// 必须用实际值，不能从 -listen 字符串里解析）。
 func localListenPort() int {
-	addr := *listenAddr
-	if idx := strings.LastIndex(addr, ":"); idx >= 0 {
-		if p, err := strconv.Atoi(addr[idx+1:]); err == nil {
-			return p
-		}
-	}
-	return 51830
+	return actualListenPort
 }
 
 func upnpEnsureOnce() error {

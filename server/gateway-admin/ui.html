@@ -434,6 +434,12 @@ details.more .more-body{margin-top:7px;font-size:11.5px;line-height:1.7;color:va
     <div class="content">
       <!-- 概览 -->
       <section id="page-overview">
+        <div class="card" id="pw-warn" style="display:none;border-color:var(--warn)">
+          <div class="card-body" style="padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <div><b>正在使用默认密码 admin123</b><span class="muted" style="font-size:12px"> · 建议尽快修改，避免管理台被未授权访问</span></div>
+            <button class="btn rsm" onclick="go('settings')">去修改</button>
+          </div>
+        </div>
         <div class="stats" id="stats"></div>
         <div class="card hero">
           <div class="hero-grid">
@@ -541,6 +547,29 @@ details.more .more-body{margin-top:7px;font-size:11.5px;line-height:1.7;color:va
               <div class="field" style="display:flex;align-items:flex-end"><button class="btn primary" onclick="savePort()" title="更新端口并重建隧道核心（约 5~10 秒），之后需重新导出客户端配置"><svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2Zm7-2 5-5h-3V4h-4v9H7l5 5Z"/></svg>保存并重建</button></div>
             </div>
             <div class="muted" style="font-size:12px;margin-top:2px" id="if-state"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><div><h3>网络与默认值</h3><span class="hint">不填则自动探测；环境变量优先</span></div></div>
+          <div class="card-body">
+            <div class="muted" style="font-size:12px;margin-bottom:10px" id="sys-detect">—</div>
+            <div class="inline" style="max-width:900px">
+              <div class="field"><label>客户端 DNS</label><input class="input" id="sys-dns" placeholder="自动：默认网关"><div class="help" id="sys-dns-hint"></div></div>
+              <div class="field"><label>局域网网段</label><input class="input" id="sys-lan" placeholder="自动探测"><div class="help" id="sys-lan-hint"></div></div>
+            </div>
+            <div class="inline" style="max-width:900px">
+              <div class="field"><label>打洞端口（UDP）</label><input class="input" id="sys-stun-port" type="number" min="0" max="65535" placeholder="0 = 随机"><div class="help" id="sys-stun-hint">0 表示每次启动随机端口</div></div>
+              <div class="field"><label>隧道客户端网段</label><input class="input" id="sys-client-net" placeholder="10.8.0.0/24"><div class="help">修改会重排现有客户端 IPv4，需要重新下载配置</div></div>
+            </div>
+            <div class="row" style="gap:8px">
+              <button class="btn primary" onclick="saveSystemSettings()">保存网络设置</button>
+              <button class="btn" onclick="randomStunPort()">随机打洞端口</button>
+              <span class="badge neutral hidden" id="sys-state"></span>
+            </div>
+            <details class="more">
+              <summary>说明</summary>
+              <div class="more-body">DNS / 局域网网段会用于新生成的客户端和出口规则；打洞端口保存后会重建 homing-stun，实际端口在上方「接口设置」和概览里显示。环境变量 CORE_DNS / CORE_LAN / CLIENT_NET / STUN_PORT 优先于这里。修改隧道客户端网段会让现有客户端地址重新编号，旧配置全部失效。</div>
+            </details>
           </div>
         </div>
         <div class="card">
@@ -932,7 +961,7 @@ async function doLogin2fa() {
 
 async function enterApp() {
   showApp(); await refresh(false); await loadConfig(); await loadAccount(); await loadNetwork();
-  await loadClientProbe(); await loadConnectSettings(); await loadEgress(); startTimer();
+  await loadClientProbe(); await loadConnectSettings(); await loadEgress(); await loadSystemSettings(); startTimer();
 }
 
 $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
@@ -960,6 +989,7 @@ function go(page) {
   location.hash = page;
   render();
   if (page === 'egress') loadEgress();
+  if (page === 'settings') loadSystemSettings();
 }
 document.querySelectorAll('.nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); go(a.dataset.page); }));
 
@@ -971,6 +1001,7 @@ async function refresh(manual) {
   let d;
   try { d = await api('/api/overview'); } catch (e) { return; }
   S.data = d;
+  if ($('pw-warn')) $('pw-warn').style.display = d.defaultPassword ? '' : 'none';
   if (manual) toast('已刷新', 'ok');
   // 侧边栏健康
   const st = d.stun || {}, cur = st.current || null;
@@ -1235,6 +1266,71 @@ async function loadNetwork() {
     if ($('v6-port') && n.wgPort) $('v6-port').value = n.wgPort;
     if ($('if-newport') && !$('if-newport').value) $('if-newport').value = n.wgPort || '';
   } catch (e) {}
+}
+
+const SRC_LABEL = {env:'环境变量', settings:'管理台设置', auto:'自动探测', default:'内置默认', core:'跟随核心'};
+async function loadSystemSettings() {
+  try {
+    const r = await api('/api/system-settings');
+    S.sys = r;
+    const s = r.settings || {};
+    if ($('sys-dns')) {
+      $('sys-dns').value = s.dns || '';
+      $('sys-dns').placeholder = '自动：' + (r.detectedGateway || '默认网关');
+      if ($('sys-dns-hint')) $('sys-dns-hint').textContent = '当前生效：' + (r.dns || '—') + '（' + (SRC_LABEL[(r.sources||{}).dns] || '自动') + '）';
+    }
+    if ($('sys-lan')) {
+      $('sys-lan').value = s.lan || '';
+      $('sys-lan').placeholder = '自动：' + (r.detectedLAN || '默认网卡网段');
+      if ($('sys-lan-hint')) $('sys-lan-hint').textContent = '当前生效：' + (r.lan || '—') + '（' + (SRC_LABEL[(r.sources||{}).lan] || '自动') + '）';
+    }
+    if ($('sys-stun-port')) $('sys-stun-port').value = s.stunPort || 0;
+    if ($('sys-stun-hint')) {
+      const st = r.stun || {};
+      const actual = st.localPort || ((st.listen || '').split(':').pop());
+      $('sys-stun-hint').textContent = actual ? ('当前实际端口：' + actual + (st.listen ? '（' + st.listen + '）' : '')) : '0 表示随机端口';
+    }
+    if ($('sys-client-net')) $('sys-client-net').value = r.clientNet || ((r.core || {}).ipv4Cidr || '');
+    if ($('sys-detect')) {
+      $('sys-detect').textContent = '自动探测：网关 ' + (r.detectedGateway || '—') +
+        ' · 局域网 ' + (r.detectedLAN || '—') +
+        ' · 部署目录 ' + (r.vpnHostDir || '—');
+    }
+  } catch (e) {}
+}
+
+function setSysState(text, kind) {
+  const el = $('sys-state');
+  if (!el) return;
+  if (!text) { el.className = 'badge neutral hidden'; el.textContent = ''; return; }
+  el.className = 'badge ' + (kind || 'neutral');
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+function randomStunPort() {
+  if ($('sys-stun-port')) $('sys-stun-port').value = 0;
+  setSysState('已选随机端口，点「保存网络设置」生效', 'neutral');
+}
+
+async function saveSystemSettings() {
+  const body = {
+    dns: ($('sys-dns') ? $('sys-dns').value.trim() : ''),
+    lan: ($('sys-lan') ? $('sys-lan').value.trim() : ''),
+    clientNet: ($('sys-client-net') ? $('sys-client-net').value.trim() : ''),
+    stunPort: parseInt($('sys-stun-port') ? $('sys-stun-port').value : '0', 10) || 0
+  };
+  setSysState('保存中…', 'neutral');
+  try {
+    const r = await api('/api/system-settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const msgs = (r.messages || []).concat(r.warnings || []);
+    setSysState(msgs.length ? msgs.join('；') : '已保存', (r.warnings || []).length ? 'warn' : 'ok');
+    toast(msgs.length ? msgs.join('；') : '网络设置已保存', (r.warnings || []).length ? 'warn' : 'ok');
+    await loadNetwork(); await loadSystemSettings(); await refresh(false);
+  } catch (e) {
+    setSysState('保存失败：' + e.message, 'err');
+    toast('保存失败：' + e.message, 'err');
+  }
 }
 
 async function loadClientProbe() {

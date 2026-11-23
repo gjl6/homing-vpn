@@ -26,12 +26,12 @@ case "$1" in
     exec /usr/local/bin/homing-plumber "$@"
     ;;
   proxy)
-    # remote 出口的本机透明代理；配置由管理台写入 /stun-data/proxy/config.yaml
+    # remote 出口的本机透明代理；配置由管理台写入 /data/proxy/config.yaml
     shift
     # Docker 的 /dev 是 tmpfs，镜像里的设备节点会被覆盖，运行时补一次
     mkdir -p /dev/net 2>/dev/null || true
     [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
-    exec /usr/local/bin/mihomo -d /stun-data/proxy -f /stun-data/proxy/config.yaml "$@"
+    exec /usr/local/bin/mihomo -d /data/proxy -f /data/proxy/config.yaml "$@"
     ;;
   *)
     exec "$@"

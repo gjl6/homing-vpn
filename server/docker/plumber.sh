@@ -3,24 +3,24 @@
 #
 # 前提：homing-core 与本容器都使用 host 网络，core 不再做跨容器 NAT，
 # 因此宿主机能看到真实的客户端源地址（10.8.0.x），可以按客户端分流：
-#   /stun-data/egress-clients 里列出的 IP（每行一个）→ 策略路由到 TUN
+#   /data/egress-clients 里列出的 IP（每行一个）→ 策略路由到 TUN
 #   其它客户端 → 继续走 core 自己的 MASQUERADE / 直连
 #
-# 配置由管理台写入 /stun-data/egress.env；本脚本启动时读取一次。
+# 配置由管理台写入 /data/egress.env；本脚本启动时读取一次。
 # 客户端列表每轮重新读取，管理台开关客户端后最多 INTERVAL 秒生效。
 #
 # IPv4 才走代理；IPv6 保持 home 侧直连（mihomo TUN 当前 IPv4-only）。
 set -eu
 
-CONFIG_FILE="${EGRESS_CONFIG:-/stun-data/egress.env}"
-STATUS_FILE="${EGRESS_STATUS:-/stun-data/egress-status.json}"
+CONFIG_FILE="${EGRESS_CONFIG:-/data/egress.env}"
+STATUS_FILE="${EGRESS_STATUS:-/data/egress-status.json}"
 
 EGRESS_ENABLED=0
 EGRESS_MODE=tun
 MIHOMO_TUN=mihomo-gw
 MIHOMO_TABLE=100
 CLIENT_NET=10.8.0.0/24
-CLIENTS_FILE="${EGRESS_CLIENTS_FILE:-/stun-data/egress-clients}"
+CLIENTS_FILE="${EGRESS_CLIENTS_FILE:-/data/egress-clients}"
 LAN_CIDRS="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16"
 EGRESS_DNS_LISTEN=""
 EGRESS_DNS_PORT=0

@@ -40,18 +40,21 @@ var uiFS embed.FS
 
 // ---------- 配置 ----------
 var (
-	listenAddr   = getenv("ADMIN_LISTEN", ":51822")
-	coreBase     = getenv("CORE_BASE", "http://127.0.0.1:51821")
-	stunBase     = getenv("STUN_STATUS", "http://127.0.0.1:51831")
-	dataDir      = getenv("DATA_DIR", "/stun-data")
-	adminPass    = os.Getenv("ADMIN_PASSWORD")
-	coreUser     = getenv("CORE_ADMIN_USER", "")
-	corePass     = os.Getenv("CORE_ADMIN_PASSWORD")
-	vpnDir       = getenv("VPN_DIR", "/vpn")
-	coreLAN      = getenv("CORE_LAN", "192.168.1.0/24")
-	coreDNS      = getenv("CORE_DNS", "192.168.1.1")
-	stunCfgPath  = dataDir + "/config.json"
-	endpointPath = dataDir + "/endpoint.json"
+	listenAddr = getenv("ADMIN_LISTEN", ":51822")
+	coreBase   = getenv("CORE_BASE", "http://127.0.0.1:51821")
+	stunBase   = getenv("STUN_STATUS", "http://127.0.0.1:51831")
+	dataDir    = getenv("DATA_DIR", "/data")
+	adminPass  = os.Getenv("ADMIN_PASSWORD")
+	coreUser   = getenv("CORE_ADMIN_USER", "")
+	corePass   = os.Getenv("CORE_ADMIN_PASSWORD")
+	// vpnDir 是容器内可见的部署目录（compose 把仓库目录挂到 /vpn）；
+	// 宿主机上的真实路径由 detectVPNHostDir 通过 compose 标签自动探测。
+	vpnDir     = getenv("VPN_DIR", "/vpn")
+	vpnHostDir = detectVPNHostDir()
+	// 统一的数据目录（容器内 /data）：core.json、admin.json、stun/、egress 等都在这里。
+	settingsPath = dataDir + "/settings.json"
+	stunCfgPath  = dataDir + "/stun/config.json"
+	endpointPath = dataDir + "/stun/endpoint.json"
 	// 客户端探针默认参数（管理台设置 → 写进新生成的客户端配置的 probe 字段）
 	clientProbePath = dataDir + "/client-probe.json"
 	// 连接方式 / 传输优先级（STUN 开关 + 公网直连地址 + v4/v6 优先级）
@@ -67,11 +70,298 @@ var (
 	proxyConfigPath = proxyDir + "/config.yaml"
 )
 
+// systemSettings 是管理台维护的服务端默认值；环境变量仍然优先。
+type systemSettings struct {
+	DNS       string `json:"dns"`       // 客户端 DNS，逗号分隔；空=自动探测默认网关
+	LAN       string `json:"lan"`       // 家庭/办公室局域网网段，逗号分隔；空=自动探测
+	ClientNet string `json:"clientNet"` // 隧道客户端网段；空=跟随隧道核心
+	StunPort  int    `json:"stunPort"`  // 打洞端口；0=随机
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
+}
+
+var (
+	sysMu  sync.RWMutex
+	sysCfg systemSettings
+)
+
+func detectVPNHostDir() string {
+	// VPN_DIR 是容器内路径；宿主机路径优先用显式覆盖，其次从 compose 标签/挂载自动探测。
+	if v := strings.TrimSpace(os.Getenv("VPN_HOST_DIR")); v != "" {
+		return v
+	}
+	host, err := os.Hostname()
+	if err == nil {
+		out, err := exec.Command("docker", "inspect", host, "--format",
+			`{{index .Config.Labels "com.docker.compose.project.working_dir"}}`).Output()
+		if err == nil {
+			if s := strings.TrimSpace(string(out)); s != "" {
+				return s
+			}
+		}
+		// 回退：从容器挂载里找 /vpn 的宿主机来源
+		out, err = exec.Command("docker", "inspect", host, "--format",
+			`{{range .Mounts}}{{.Destination}}={{.Source}} {{end}}`).Output()
+		if err == nil {
+			for _, f := range strings.Fields(string(out)) {
+				if strings.HasPrefix(f, "/vpn=") {
+					if s := strings.TrimPrefix(f, "/vpn="); s != "" {
+						return s
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// composeArgs 返回容器内可用的 docker compose 命令；compose 文件通过 /vpn 挂载，
+// 数据目录则把宿主机绝对路径传给 daemon（容器内相对路径不能直接用）。
+func composeArgs(args ...string) ([]string, string, []string) {
+	dir := vpnDir
+	hostDir := vpnHostDir
+	if hostDir == "" {
+		hostDir = dir
+	}
+	cmdArgs := append([]string{"compose", "--project-directory", dir, "-f", dir + "/docker-compose.yml"}, args...)
+	env := append(os.Environ(), "HOMING_DATA_DIR="+hostDir+"/data")
+	return cmdArgs, dir, env
+}
+
+func runCompose(args ...string) (string, error) {
+	if strings.TrimSpace(vpnHostDir) == "" {
+		return "", fmt.Errorf("无法自动探测宿主机部署目录，请给 homing-admin 设置 VPN_HOST_DIR")
+	}
+	// 管理台只负责启停已有镜像，不让 compose 触发构建。
+	if len(args) > 0 && args[0] == "up" {
+		args = append([]string{"up", "--no-build"}, args[1:]...)
+	}
+	cmdArgs, dir, env := composeArgs(args...)
+	cmd := exec.Command("docker", cmdArgs...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 func getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return def
+}
+
+// ---------- 系统默认值（自动探测 + 管理台可改，环境变量优先） ----------
+
+func loadSystemSettings() {
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return
+	}
+	var s systemSettings
+	if json.Unmarshal(b, &s) == nil {
+		sysMu.Lock()
+		sysCfg = s
+		sysMu.Unlock()
+	}
+}
+
+func saveSystemSettings(s systemSettings) error {
+	s.UpdatedAt = time.Now().Unix()
+	b, _ := json.MarshalIndent(s, "", "  ")
+	_ = os.MkdirAll(dataDir, 0o755)
+	tmp := settingsPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, settingsPath); err != nil {
+		return err
+	}
+	sysMu.Lock()
+	sysCfg = s
+	sysMu.Unlock()
+	return nil
+}
+
+func currentSystemSettings() systemSettings {
+	sysMu.RLock()
+	defer sysMu.RUnlock()
+	return sysCfg
+}
+
+// detectGateway 从 /proc/net/route 读默认路由网关（host 网络下可用）。
+func detectGateway() string {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "00000000" {
+			continue
+		}
+		v, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil {
+			continue
+		}
+		return net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24)).String()
+	}
+	return ""
+}
+
+// detectLAN 返回默认路由网卡上的 IPv4 网段（如 192.168.9.0/24）。
+func detectLAN() string {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	ifaceName := ""
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[1] == "00000000" {
+			ifaceName = f[0]
+			break
+		}
+	}
+	if ifaceName == "" {
+		return ""
+	}
+	ifi, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return ""
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok || ipn.IP.To4() == nil {
+			continue
+		}
+		return (&net.IPNet{IP: ipn.IP.Mask(ipn.Mask), Mask: ipn.Mask}).String()
+	}
+	return ""
+}
+
+func envDNS() string { return strings.TrimSpace(os.Getenv("CORE_DNS")) }
+func envLAN() string { return strings.TrimSpace(os.Getenv("CORE_LAN")) }
+func envNet() string { return strings.TrimSpace(os.Getenv("CLIENT_NET")) }
+
+func effectiveDNS() []string {
+	if v := envDNS(); v != "" {
+		return splitCSV(v)
+	}
+	if v := strings.TrimSpace(currentSystemSettings().DNS); v != "" {
+		return splitCSV(v)
+	}
+	if gw := detectGateway(); gw != "" {
+		return []string{gw}
+	}
+	return []string{"223.5.5.5"}
+}
+
+func effectiveDNSString() string { return strings.Join(effectiveDNS(), ",") }
+
+func effectiveLAN() string {
+	if v := envLAN(); v != "" {
+		return normalizeCIDRList(v)
+	}
+	if v := strings.TrimSpace(currentSystemSettings().LAN); v != "" {
+		return normalizeCIDRList(v)
+	}
+	return normalizeCIDRList(detectLAN())
+}
+
+func coreInterfaceCIDR() string {
+	if code, b, err := coreDo("GET", "/api/admin/interface", nil); err == nil && code == 200 {
+		var iface map[string]interface{}
+		if json.Unmarshal(b, &iface) == nil {
+			if s, _ := iface["ipv4Cidr"].(string); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func effectiveClientNet() string {
+	if v := envNet(); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(currentSystemSettings().ClientNet); v != "" {
+		return v
+	}
+	if v := coreInterfaceCIDR(); v != "" {
+		return v
+	}
+	return "10.8.0.0/24"
+}
+
+func settingsSources() map[string]string {
+	src := map[string]string{}
+	if envDNS() != "" {
+		src["dns"] = "env"
+	} else if strings.TrimSpace(currentSystemSettings().DNS) != "" {
+		src["dns"] = "settings"
+	} else if detectGateway() != "" {
+		src["dns"] = "auto"
+	} else {
+		src["dns"] = "default"
+	}
+	if envLAN() != "" {
+		src["lan"] = "env"
+	} else if strings.TrimSpace(currentSystemSettings().LAN) != "" {
+		src["lan"] = "settings"
+	} else if detectLAN() != "" {
+		src["lan"] = "auto"
+	} else {
+		src["lan"] = "default"
+	}
+	if envNet() != "" {
+		src["clientNet"] = "env"
+	} else if strings.TrimSpace(currentSystemSettings().ClientNet) != "" {
+		src["clientNet"] = "settings"
+	} else {
+		src["clientNet"] = "core"
+	}
+	return src
+}
+
+func defaultPasswordActive() bool {
+	accMu.Lock()
+	a := acct
+	accMu.Unlock()
+	return a != nil && verifyPassword("admin123", a.PasswordHash)
+}
+
+func validDNSList(s string) error {
+	for _, p := range splitCSV(s) {
+		if net.ParseIP(p) == nil {
+			return fmt.Errorf("DNS 地址不合法：%s", p)
+		}
+	}
+	return nil
+}
+
+func validLANList(s string) error {
+	for _, c := range splitCSV(s) {
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			return fmt.Errorf("局域网网段不合法：%s", c)
+		}
+	}
+	return nil
+}
+
+func validClientNet(s string) error {
+	ip, n, err := net.ParseCIDR(s)
+	if err != nil || ip.To4() == nil {
+		return fmt.Errorf("隧道网段不合法：%s", s)
+	}
+	ones, _ := n.Mask.Size()
+	if ones < 16 || ones > 30 {
+		return fmt.Errorf("隧道网段前缀只支持 /16~/30：%s", s)
+	}
+	return nil
 }
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
@@ -527,12 +817,12 @@ func createClient(name, mode string) (int, error) {
 	}
 	allowed := []string{"0.0.0.0/0", "::/0"}
 	if mode == "lan" {
-		allowed = []string{"10.8.0.0/24", coreLAN}
+		allowed = append([]string{effectiveClientNet()}, splitCSV(effectiveLAN())...)
 	}
 	code, ub, err := updateClient(r.ClientID, func(m map[string]interface{}) {
 		m["allowedIps"] = allowed
 		m["serverAllowedIps"] = []string{}
-		m["dns"] = []string{coreDNS}
+		m["dns"] = effectiveDNS()
 		m["persistentKeepalive"] = 25
 	})
 	if err != nil {
@@ -836,6 +1126,7 @@ func handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		out["clients"] = views
 	}
+	out["defaultPassword"] = defaultPasswordActive()
 	writeJSON(w, 200, out)
 }
 
@@ -949,7 +1240,7 @@ func tunnelClientFromRequest(r *http.Request) (map[string]interface{}, string, e
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
-	_, cidr, err := net.ParseCIDR(getenv("CLIENT_NET", "10.8.0.0/24"))
+	_, cidr, err := net.ParseCIDR(effectiveClientNet())
 	if err != nil || !cidr.Contains(ip) {
 		return nil, "", fmt.Errorf("只允许隧道内客户端调用")
 	}
@@ -1033,7 +1324,7 @@ func handleSelfProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // refreshEgressClients 把「启用且开启代理出口」的客户端 IPv4 写到
-// /stun-data/egress-clients，homing-egress 每轮读取并按源地址分流。
+// /data/egress-clients，homing-egress 每轮读取并按源地址分流。
 func refreshEgressClients() {
 	clients, err := listClients()
 	if err != nil {
@@ -1914,10 +2205,8 @@ func handleSetPort(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 重建 隧道核心（端口映射变化，必须 recreate）
-	cmd := exec.Command("docker", "compose", "--project-directory", vpnDir, "-f", vpnDir+"/docker-compose.yml", "up", "-d", "--force-recreate", "--no-deps", "homing-core")
-	cmd.Dir = vpnDir
-	outBytes, err := cmd.CombinedOutput()
-	msg := strings.TrimSpace(string(outBytes))
+	out, err := runCompose("up", "-d", "--force-recreate", "--no-deps", "homing-core")
+	msg := out
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "端口已写入配置，但重建容器失败：" + err.Error() + "\n" + truncateMsg(msg)})
 		return
@@ -1927,6 +2216,141 @@ func handleSetPort(w http.ResponseWriter, r *http.Request) {
 		"v6Endpoint": fmt.Sprintf("[<v6>]:%d", req.Port),
 		"message":    truncateMsg(msg),
 	})
+}
+
+// handleSystemSettings 管理台「网络与默认值」：DNS / 局域网网段 / 隧道网段 / 打洞端口。
+func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cur := currentSystemSettings()
+		out := map[string]interface{}{
+			"settings":        cur,
+			"dns":             effectiveDNSString(),
+			"lan":             effectiveLAN(),
+			"clientNet":       effectiveClientNet(),
+			"sources":         settingsSources(),
+			"detectedGateway": detectGateway(),
+			"detectedLAN":     detectLAN(),
+			"defaultPassword": defaultPasswordActive(),
+			"vpnHostDir":      vpnHostDir,
+			"dataDir":         dataDir,
+		}
+		if iface, err := readWGInterface(); err == nil {
+			out["core"] = iface
+		} else {
+			out["coreError"] = err.Error()
+		}
+		if st, err := fetchStunStatus(); err == nil {
+			out["stun"] = map[string]interface{}{
+				"listen":        st["listen"],
+				"localPort":     st["localPort"],
+				"current":       st["current"],
+				"target":        st["target"],
+				"v6Endpoint":    st["v6Endpoint"],
+				"lastStunOk":    st["lastStunOk"],
+				"relaySessions": st["relaySessions"],
+				"relayPackets":  st["relayPackets"],
+				"uptimeSeconds": st["uptimeSeconds"],
+			}
+		}
+		writeJSON(w, 200, out)
+		return
+
+	case http.MethodPost:
+		var req struct {
+			DNS       string `json:"dns"`
+			LAN       string `json:"lan"`
+			ClientNet string `json:"clientNet"`
+			StunPort  int    `json:"stunPort"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "请求格式错误"})
+			return
+		}
+		dns := strings.TrimSpace(req.DNS)
+		lan := strings.TrimSpace(req.LAN)
+		netStr := strings.TrimSpace(req.ClientNet)
+		if err := validDNSList(dns); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validLANList(lan); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if netStr != "" {
+			if err := validClientNet(netStr); err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if req.StunPort != 0 && (req.StunPort < 1024 || req.StunPort > 65535) {
+			writeJSON(w, 400, map[string]string{"error": "打洞端口范围 1024-65535（0=随机）"})
+			return
+		}
+
+		old := currentSystemSettings()
+		msgs := []string{}
+		warnings := []string{}
+
+		// 1) 隧道网段：交给隧道核心改（会重排现有客户端 IPv4）
+		if netStr != "" && netStr != coreInterfaceCIDR() {
+			body, _ := json.Marshal(map[string]interface{}{"ipv4Cidr": netStr})
+			if code, rb, err := coreDo("POST", "/api/admin/interface", body); err != nil || code != 200 {
+				writeJSON(w, 500, map[string]string{"error": fmt.Sprintf("更新隧道核心网段失败: %v %s", err, string(rb))})
+				return
+			}
+			msgs = append(msgs, "隧道网段已更新")
+			warnings = append(warnings, "现有客户端的 IPv4 已重新编号，请让用户重新下载/扫码导入配置")
+		}
+
+		// 2) DNS：同时写入核心全局默认（新客户端默认 DNS）
+		dnsToApply := splitCSV(dns)
+		if len(dnsToApply) == 0 {
+			dnsToApply = effectiveDNS()
+		}
+		body, _ := json.Marshal(map[string]interface{}{"dns": dnsToApply})
+		if code, rb, err := coreDo("POST", "/api/admin/interface", body); err != nil || code != 200 {
+			// DNS 写入失败不阻塞其它设置，但提示
+			warnings = append(warnings, fmt.Sprintf("DNS 写入隧道核心失败: %v %s", err, truncateMsg(string(rb))))
+		}
+
+		// 3) 先保存设置（打洞端口重启后 stun 会读它）
+		next := systemSettings{DNS: dns, LAN: lan, ClientNet: netStr, StunPort: req.StunPort}
+		if err := saveSystemSettings(next); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "保存设置失败：" + err.Error()})
+			return
+		}
+
+		// 4) 打洞端口变化：重建 homing-stun（stun 启动时读 settings.json）
+		if req.StunPort != old.StunPort {
+			out, err := runCompose("up", "-d", "--force-recreate", "--no-deps", "homing-stun")
+			if err != nil {
+				writeJSON(w, 500, map[string]interface{}{
+					"error": "设置已保存，但重建打洞容器失败：" + err.Error(),
+					"log":   truncateMsg(out),
+				})
+				return
+			}
+			if req.StunPort == 0 {
+				msgs = append(msgs, "打洞端口已改为随机，正在重新发现公网端点")
+			} else {
+				msgs = append(msgs, fmt.Sprintf("打洞端口已改为 %d", req.StunPort))
+			}
+		}
+
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":        true,
+			"dns":       effectiveDNSString(),
+			"lan":       effectiveLAN(),
+			"clientNet": effectiveClientNet(),
+			"messages":  msgs,
+			"warnings":  warnings,
+		})
+		return
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
 }
 
 func truncateMsg(s string) string {
@@ -2006,7 +2430,7 @@ func defaultEgressConfig() egressConfig {
 		Tun:       "mihomo-gw",
 		Table:     100,
 		CoreNet:   "10.43.43.0/24",
-		ClientNet: getenv("CLIENT_NET", "10.8.0.0/24"),
+		ClientNet: effectiveClientNet(),
 		ProxyType: "socks5",
 		ProxyPort: 7890,
 		DNSListen: "0.0.0.0:1053",
@@ -2037,7 +2461,7 @@ func loadEgressConfig() egressConfig {
 		cfg.CoreNet = "10.43.43.0/24"
 	}
 	if strings.TrimSpace(cfg.ClientNet) == "" {
-		cfg.ClientNet = getenv("CLIENT_NET", "10.8.0.0/24")
+		cfg.ClientNet = effectiveClientNet()
 	}
 	if strings.TrimSpace(cfg.ProxyType) == "" {
 		cfg.ProxyType = "socks5"
@@ -2234,7 +2658,7 @@ CLIENT_NET=%s
 LAN_CIDRS=%s
 EGRESS_DNS_LISTEN=%s
 EGRESS_DNS_PORT=%d
-EGRESS_CLIENTS_FILE=/stun-data/egress-clients
+EGRESS_CLIENTS_FILE=/data/egress-clients
 `, boolToInt(c.Enabled), c.Mode, c.Tun, c.Table, c.ClientNet, c.DirectCIDRs,
 		c.DNSListen, dnsPort)
 	if err := os.WriteFile(egressEnvPath, []byte(env), 0o600); err != nil {
@@ -2286,10 +2710,13 @@ func renderProxyConfig(c egressConfig) string {
 		b.WriteString("  proxy-server-nameserver:\n")
 		writeYAMLList(&b, "    ", servers)
 		// 局域网域名交给现有 DNS，避免被公共 DNS 解析成外网地址。
-		if ip := net.ParseIP(strings.Trim(coreDNS, "[]")); ip != nil && len(servers) > 0 {
-			b.WriteString("  nameserver-policy:\n")
-			for _, domain := range []string{"+.lan", "+.local", "+.home.arpa"} {
-				fmt.Fprintf(&b, "    %q: [%q]\n", domain, coreDNS)
+		dnsList := effectiveDNS()
+		if len(dnsList) > 0 {
+			if ip := net.ParseIP(strings.Trim(dnsList[0], "[]")); ip != nil && len(servers) > 0 {
+				b.WriteString("  nameserver-policy:\n")
+				for _, domain := range []string{"+.lan", "+.local", "+.home.arpa"} {
+					fmt.Fprintf(&b, "    %q: [%q]\n", domain, dnsList[0])
+				}
 			}
 		}
 	} else {
@@ -2423,13 +2850,7 @@ func egressStatus(cfg egressConfig) egressRuntimeStatus {
 }
 
 func runEgressCompose(args ...string) (string, error) {
-	base := []string{"compose", "--project-directory", vpnDir, "-f", vpnDir + "/docker-compose.yml", "--profile", "egress"}
-	cmd := exec.Command("docker", append(base, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return strings.TrimSpace(string(out)), err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return runCompose(append([]string{"--profile", "egress"}, args...)...)
 }
 
 func waitContainerState(name string, running bool, timeout time.Duration) string {
@@ -2478,7 +2899,7 @@ func handleEgress(w http.ResponseWriter, r *http.Request) {
 		req.CoreNet = strings.TrimSpace(req.CoreNet)
 		req.ClientNet = strings.TrimSpace(req.ClientNet)
 		if req.ClientNet == "" {
-			req.ClientNet = getenv("CLIENT_NET", "10.8.0.0/24")
+			req.ClientNet = effectiveClientNet()
 		}
 		req.DirectCIDRs = normalizeCIDRList(req.DirectCIDRs)
 		req.ProxyType = strings.TrimSpace(req.ProxyType)
@@ -2563,10 +2984,10 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	// 自研 homing-core 不需要管理员密码（只监听 127.0.0.1，由管理台独占访问）
 	_ = os.MkdirAll(dataDir, 0o755)
-	if _, err := os.Stat(acctPath); os.IsNotExist(err) {
-		if adminPass == "" {
-			log.Fatal("首次启动需要 ADMIN_PASSWORD 用于初始化管理账户")
-		}
+	loadSystemSettings()
+	if adminPass == "" {
+		adminPass = "admin123"
+		log.Printf("未设置 ADMIN_PASSWORD，首次启动使用默认密码 admin123，请登录后尽快修改")
 	}
 	loadAccount()
 	// 让 plumber 的客户端列表始终跟 core 保持一致（core 重启/手动改数据也能自愈）
@@ -2602,6 +3023,7 @@ func main() {
 	mux.HandleFunc("/api/apply-endpoint", requireAuth(handleApplyEndpoint))
 	mux.HandleFunc("/api/dns/test", requireAuth(handleDNSTest))
 	mux.HandleFunc("/api/network", requireAuth(handleGetNetwork))
+	mux.HandleFunc("/api/system-settings", requireAuth(handleSystemSettings))
 	mux.HandleFunc("/api/client-probe", requireAuth(handleClientProbe))
 	mux.HandleFunc("/api/connect-settings", requireAuth(handleConnectSettings))
 	mux.HandleFunc("/api/connect-settings/detect", requireAuth(handleDetectAddresses))

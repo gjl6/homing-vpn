@@ -4,7 +4,7 @@
 // 2. 同一 socket 接收 隧道 客户端包，中继给本机 隧道核心（默认 127.0.0.1:500），回包按会话送回；
 // 3. 端点变化发布：状态文件 / ntfy / 自定义命令 / Cloudflare TXT；
 // 4. HTTP 状态接口（默认 :51831）给管理页用：当前端点、STUN 健康、发布历史、中继统计；
-// 5. 运行配置热加载：/stun-data/config.json（STUN 服务器、推送、TXT），10s 轮询，无需重启。
+// 5. 运行配置热加载：/data/stun/config.json（STUN 服务器、推送、TXT），10s 轮询，无需重启。
 package main
 
 import (
@@ -45,13 +45,14 @@ const (
 
 // ---------- 配置 ----------
 var (
-	listenAddr       = flag.String("listen", ":51830", "本地监听地址（打洞 socket / 中继入口）")
+	listenAddr       = flag.String("listen", "", "本地监听地址（打洞 socket / 中继入口，如 :51830 / 127.0.0.1:0；留空=按 settings-file 的 stunPort 自动选择，未配置则随机端口）")
+	settingsFile     = flag.String("settings-file", "/data/settings.json", "管理台设置文件（只读 stunPort；文件缺失或字段为 0 时用随机端口）")
 	targetAddr       = flag.String("target", "127.0.0.1:51820", "隧道服务地址（隧道核心 发布端口）")
 	stunServers      = flag.String("stun", "stun.miwifi.com:3478,stun.chat.bilibili.com:3478,stun.l.google.com:19302", "STUN 服务器，逗号分隔")
 	keepalive        = flag.Duration("keepalive", 15*time.Second, "STUN 保活间隔")
 	sessionTTL       = flag.Duration("session-ttl", 3*time.Minute, "中继会话空闲回收时间")
-	stateFile        = flag.String("state-file", "/stun-data/endpoint.json", "端点状态文件")
-	configFile       = flag.String("config-file", "/stun-data/config.json", "热加载配置文件")
+	stateFile        = flag.String("state-file", "/data/stun/endpoint.json", "端点状态文件")
+	configFile       = flag.String("config-file", "/data/stun/config.json", "热加载配置文件")
 	httpAddr         = flag.String("http", ":51831", "状态 HTTP 接口地址（供管理页使用）")
 	publicHTTP       = flag.String("public-http", ":18081", "打洞自检页 HTTP 地址（0.0.0.0，可从公网/IPv6 访问）")
 	upnpEnabled      = flag.Bool("upnp", false, "启动时用 UPnP 自动建立 UDP 端口映射（免手配端口转发）")
@@ -65,6 +66,53 @@ var (
 	once             = flag.Bool("once", false, "只查询一次 STUN 并打印后退出（调试用）")
 	verbose          = flag.Bool("verbose", false, "打印每个中继包（调试用）")
 )
+
+// 实际监听地址：-listen 与 settings-file 决策后由内核分配的真实地址/端口。
+// -listen 里可能是 :0（随机端口），所以状态接口和 UPnP 映射都必须用这里的实际值。
+var (
+	actualListenAddr string
+	actualListenPort int
+)
+
+// settingsData 是管理台维护的 settings.json 中网关关心的字段。
+// 文件不存在、字段缺失或 JSON 解析失败都按 0（随机端口）处理。
+type settingsData struct {
+	StunPort int `json:"stunPort"`
+}
+
+// readSettingsStunPort 读取 settings-file 的 stunPort，任何异常都返回 0。
+func readSettingsStunPort() int {
+	if *settingsFile == "" {
+		return 0
+	}
+	b, err := os.ReadFile(*settingsFile)
+	if err != nil {
+		return 0
+	}
+	var s settingsData
+	if err := json.Unmarshal(b, &s); err != nil {
+		return 0
+	}
+	return s.StunPort
+}
+
+// resolveListenAddr 决定 UDP 打洞/中继 socket 的监听地址：
+//   - -listen 非空：直接用（支持 :0 / 127.0.0.1:0 / :51830）
+//   - settings-file 的 stunPort > 0：":<stunPort>"
+//   - 其余（stunPort=0、文件缺失/解析失败）：":0"（内核分配随机端口）
+func resolveListenAddr() string {
+	if s := strings.TrimSpace(*listenAddr); s != "" {
+		// 兼容只写端口数字（例如 STUN_PORT=51830），也支持 :51830 / 127.0.0.1:0。
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 && n <= 65535 {
+			return fmt.Sprintf(":%d", n)
+		}
+		return s
+	}
+	if p := readSettingsStunPort(); p > 0 {
+		return fmt.Sprintf(":%d", p)
+	}
+	return ":0"
+}
 
 // 热加载配置
 //
@@ -1136,7 +1184,8 @@ func dirOf(p string) string {
 
 // ---------- 状态 HTTP 接口 ----------
 type statusResp struct {
-	Listen           string             `json:"listen"`
+	Listen           string             `json:"listen"`    // 实际本地监听地址，如 0.0.0.0:49262
+	LocalPort        int                `json:"localPort"` // 实际本地监听端口（随机端口时由内核分配）
 	Target           string             `json:"target"`
 	Servers          []string           `json:"servers"`
 	Current          *Endpoint          `json:"current"`
@@ -1210,7 +1259,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(statusResp{
-		Listen: *listenAddr, Target: targetDisplay(), Servers: servers,
+		Listen: actualListenAddr, LocalPort: actualListenPort, Target: targetDisplay(), Servers: servers,
 		Current: ep, FirstSeen: fs, LastStunOK: lsk,
 		StunOkCount: atomic.LoadInt64(&stunOK), MappingChanges: hist,
 		RelaySessions: nSess, RelayPackets: atomic.LoadInt64(&relayPkts),
@@ -1295,6 +1344,13 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
+	// 新的默认数据目录 /data/stun 可能还不存在，启动时先建好（发布时也会再确保一次）。
+	for _, p := range []string{*stateFile, *configFile} {
+		if p != "" {
+			_ = os.MkdirAll(dirOf(p), 0o755)
+		}
+	}
+
 	target, err := net.ResolveUDPAddr("udp", *targetAddr)
 	if err != nil {
 		log.Fatalf("resolve target: %v", err)
@@ -1313,7 +1369,9 @@ func main() {
 	}
 	loadFileConfig(true)
 
-	laddr, err := net.ResolveUDPAddr("udp", *listenAddr)
+	// 端口决策：-listen 优先；否则 settings.json 的 stunPort；都没有则 :0 随机端口。
+	listenSpec := resolveListenAddr()
+	laddr, err := net.ResolveUDPAddr("udp", listenSpec)
 	if err != nil {
 		log.Fatalf("resolve listen: %v", err)
 	}
@@ -1321,8 +1379,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
-	log.Printf("gateway-stun listening on %s, relay -> %s, keepalive=%s, http=%s",
-		conn.LocalAddr(), target, *keepalive, *httpAddr)
+	// 记录实际绑定地址（:0 时端口由内核分配），供状态接口和 UPnP 使用。
+	actualListenAddr = conn.LocalAddr().String()
+	actualListenPort = 0
+	if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		actualListenAddr = ua.String()
+		actualListenPort = ua.Port
+	}
+	log.Printf("gateway-stun listening on %s (requested %q, settings-file=%s), relay -> %s, keepalive=%s, http=%s",
+		actualListenAddr, listenSpec, *settingsFile, target, *keepalive, *httpAddr)
 
 	if *once {
 		tx := newTransactionID()
@@ -1519,7 +1584,7 @@ func punchAPIHandler(w http.ResponseWriter, r *http.Request) {
 	sessMu.Unlock()
 	port := targetPort()
 	st := punchStatus{
-		Listen:          *listenAddr,
+		Listen:          actualListenAddr,
 		Target:          targetDisplay(),
 		TargetPort:      port,
 		TargetListening: udpPortListening(port),

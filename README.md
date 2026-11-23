@@ -67,7 +67,7 @@ flowchart LR
 按客户端做策略路由必须看到真实源地址（`10.8.0.x`），容器网络会把源地址 NAT 成网桥地址，分不出是谁。host 网络还让打洞进程直接拿到公网映射、让出口规则直接写在宿主机命名空间。代价是核心容器需要 `privileged` 写宿主机 `/proc/sys` 和 iptables——这是有意的取舍，部署文档里明确说明。
 
 **3. 没有公网 IP 时，自己解决端点发现问题。**
-打洞进程监听一个 UDP 端口，把公网映射地址通过隧道内 API 交给管理台，再下发给客户端；同时支持 UPnP、中继转发和端点变化通知。客户端拿到的是"当前可用端点"，不是写死的 IP，所以宽带重播、手机切网后能自动恢复。
+打洞进程监听一个 UDP 端口，把公网映射地址通过隧道内 API 交给管理台，再下发给客户端；同时支持 UPnP、中继转发和端点变化通知。客户端拿到的是"当前可用端点"，不是写死的 IP，所以宽带重播、手机切网后能自动恢复。打洞端口**默认随机、不写死**，遇到端口被限/被封可以在管理台随时换一个，重新做 NAT 映射并发布新端点。
 
 **4. 数据面尽量交给内核，控制面只做编排。**
 隧道数据走内核接口，转发 / NAT / 策略路由用 iptables + ip rule 完成，Go 进程只负责配置、状态和健康检查。这样吞吐不受用户态转发影响，进程崩溃也不会把已有连接全部打断。
@@ -109,44 +109,78 @@ docker-compose.yml  服务端编排
 ```bash
 git clone https://github.com/gjl6/homing-vpn.git /opt/homing
 cd /opt/homing
-cp .env.example .env
-vi .env          # 至少修改 CORE_DNS、CORE_LAN、ADMIN_PASSWORD、VPN_HOST_DIR
-
-docker compose build
-docker compose up -d
+cp .env.example .env                 # 全部可选，可以不改
+vi .env                              # 用 Docker Hub 镜像时设置 HOMING_IMAGE_PREFIX=gjl168168/
+docker compose up -d                 # 本地源码构建用：docker compose up -d --build
 ```
 
-> 管理台需要挂载 `docker.sock` 来在线重建容器；`VPN_HOST_DIR` 必须等于 compose 所在目录。
-> 构建时会额外拉取一个代理内核基础镜像（仅用于可选的远程代理出口），离线环境可先 `docker pull` 或用 `--build-arg` 指定。
-> 如果构建时访问不了 `proxy.golang.org`（国内网络常见），在 `.env` 加一行 `GO_PROXY=https://goproxy.cn,direct` 再构建。
+`.env` 全部是可选项；不填时自动使用以下默认值：
+
+- 管理台 `:51822`，首次登录账号 `admin` / 密码 `admin123`（登录后请立即修改）；
+- DNS 自动取默认网关，局域网网段自动按默认路由网卡探测；
+- 隧道客户端网段 `10.8.0.0/24`；
+- 打洞端口默认随机（可在管理台随时更换）。
+
+> 管理台需要挂载 `docker.sock` 和部署目录来在线重建容器；部署路径会通过 compose 标签自动探测，不再需要手工设置 `VPN_HOST_DIR`。
+> 数据目录统一为 `./data`，可用 `HOMING_DATA_DIR` 覆盖。
+> 构建时会额外拉取一个代理内核基础镜像（仅用于可选的远程代理出口），离线环境可先 `docker pull`；访问不了 `proxy.golang.org` 时在 `.env` 加 `GO_PROXY=https://goproxy.cn,direct`。
 
 首次启动后：
 
-1. 浏览器打开 `http://<宿主机局域网 IP>:51822`，用 `.env` 里的 `ADMIN_PASSWORD` 登录（首次启动自动创建管理员）；
+1. 浏览器打开 `http://<宿主机局域网 IP>:51822`，用 `admin / admin123` 登录；
 2. 立刻修改密码并开启 TOTP；
-3. 在「客户端」里新建设备，扫码或下载配置；
-4. 路由器 / 云安全组放行 **UDP `${CORE_PORT}`**（默认 51820），**不要**把 51822 映射到公网。
+3. 「设置 → 网络与默认值」里确认/修改 DNS、局域网网段、打洞端口；
+4. 在「客户端」里新建设备，扫码或下载配置；
+5. 路由器 / 云安全组放行 **UDP `${CORE_PORT}`**（默认 51820），**不要**把 51822 映射到公网。
 
 ### 防火墙
 
-- 放行：`UDP 51820`（隧道）、`UDP 51830`（打洞，启用时）；
+- 放行：`UDP 51820`（隧道）；
+- 打洞端口默认随机，CGNAT / 无公网 IP 场景是出站流量，**不需要**在路由器放行；有公网 IP + 端口映射时，可在管理台把打洞端口改成固定值再映射；
 - 仅内网：`TCP 51822`（管理台）、`TCP 18081`（自检页，可选）；
 - 不要暴露：`51821` / `51831`（只监听本机）。
 
-## 配置项（.env）
+## 配置项（.env，全部可选）
 
-| 变量 | 说明 | 示例 |
+| 变量 | 说明 | 不设置时 |
 | --- | --- | --- |
-| `HOMING_IMAGE_PREFIX` | 镜像仓库前缀；本地构建留空 | `yourname/` |
-| `HOMING_VERSION` | 镜像 tag，同时写入 OCI label | `1.0.0` |
-| `CORE_PORT` | 隧道 / 打洞目标 / IPv6 直连统一 UDP 端口 | `51820` |
+| `HOMING_IMAGE_PREFIX` | 镜像仓库前缀 | 本地镜像 `homing:...` |
+| `HOMING_VERSION` | 镜像 tag | `local` |
+| `CORE_PORT` | 隧道 UDP 端口 | `51820` |
 | `PROBE_PORT` | 隧道内探针回显端口 | `51824` |
-| `CORE_DNS` | 下发给客户端的 DNS | `192.168.1.1` |
-| `CORE_LAN` | 家里局域网网段（「只回内网」客户端用） | `192.168.1.0/24` |
-| `CLIENT_NET` | 隧道内客户端网段 | `10.8.0.0/24` |
-| `ADMIN_PASSWORD` | 首次启动初始化管理员；之后以管理台账户 / TOTP 为准 | 至少 16 位 |
+| `CORE_DNS` | 下发给客户端的 DNS | 自动取默认网关 |
+| `CORE_LAN` | 局域网网段（可逗号分隔多个） | 自动探测默认路由网卡 |
+| `CLIENT_NET` | 隧道客户端网段 | `10.8.0.0/24` |
+| `STUN_PORT` | 打洞端口 | `0`（随机，可在管理台改） |
+| `ADMIN_PASSWORD` | 首次初始化管理员密码 | `admin123` |
 | `ADMIN_LISTEN` | 管理台监听地址 | `:51822` |
-| `VPN_HOST_DIR` | 项目绝对路径（管理台重建容器时用，必须与 compose 同目录） | `/opt/homing` |
+| `HOMING_DATA_DIR` | 数据目录（宿主机路径） | `./data` |
+| `GO_PROXY` | 构建镜像时的 Go 模块代理 | `proxy.golang.org` |
+
+管理台「设置 → 网络与默认值」修改 DNS / 局域网网段 / 打洞端口 / 隧道网段；环境变量存在的项优先于管理台设置。
+
+## 数据目录与升级
+
+所有状态都在 `./data`（旧版是 `core-data/` + `stun-data/`）：
+
+```text
+data/
+├─ core.json          服务端私钥、客户端密钥
+├─ admin.json         管理员账户 / TOTP
+├─ settings.json      管理台保存的 DNS / 网段 / 打洞端口
+├─ stun/              打洞端点和热加载配置
+├─ connect.json / client-probe.json
+├─ egress.json / egress.env / egress-clients / egress-status.json
+└─ proxy/             远程代理模式的运行配置
+```
+
+从旧版本升级：
+
+```bash
+bash scripts/migrate-data.sh        # core-data/ + stun-data/ → data/
+docker compose up -d --force-recreate
+```
+
 
 ## 客户端
 
@@ -220,14 +254,15 @@ curl -s http://127.0.0.1:51831/healthz               # 打洞健康
 
 | 路径 | 内容 |
 | --- | --- |
-| `core-data/core.json` | 服务端私钥、客户端密钥（0600） |
-| `stun-data/admin.json` | 管理员账户、TOTP（0600） |
-| `stun-data/*.json` | 打洞 / 连接方式 / 探针 / 出口配置 |
-| `stun-data/proxy/` | 远程代理模式的运行配置（含远端代理密码） |
+| `data/core.json` | 服务端私钥、客户端密钥（0600） |
+| `data/admin.json` | 管理员账户、TOTP（0600） |
+| `data/settings.json` | 管理台保存的 DNS / 网段 / 打洞端口 |
+| `data/stun/` | 打洞端点与热加载配置 |
+| `data/egress*.json`、`data/egress.env`、`data/proxy/` | 出口配置（含远端代理密码） |
 | `.env` | 部署参数 |
 
 ```bash
-tar czf homing-backup-$(date +%F).tgz core-data stun-data .env docker-compose.yml
+tar czf homing-backup-$(date +%F).tgz data .env docker-compose.yml
 ```
 
 这些目录已加入 `.gitignore`，不要提交到任何仓库。
@@ -236,7 +271,7 @@ tar czf homing-backup-$(date +%F).tgz core-data stun-data .env docker-compose.ym
 
 - 管理台只在内网或隧道内访问，**不要把 51822 暴露到公网**；远程管理先连隧道，再访问 `http://10.8.0.1:51822`。
 - 每台设备独立密钥；设备丢失立即在管理台停用或删除。
-- `core-data/`、`stun-data/`、`.env`、客户端签名密钥都不要进 git。
+- `data/`、`.env`、客户端签名密钥都不要进 git。
 - 发现安全问题请私下联系维护者，不要公开 Issue。
 
 ## 开发

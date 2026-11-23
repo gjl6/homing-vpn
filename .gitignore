@@ -8,6 +8,7 @@
 *.pfx
 
 # 运行时数据（含服务端/客户端密钥）
+data/
 core-data/
 stun-data/
 config/
@@ -34,6 +35,10 @@ __pycache__/
 
 # Go 构建产物与本机 vendor 缓存
 server/*/bin/
+server/homing-core/homing-core
+server/gateway-admin/gateway-admin
+server/stun-gateway/gateway-stun
+server/*/*.test
 server/homing-core/vendor/
 server/gateway-admin/vendor/
 

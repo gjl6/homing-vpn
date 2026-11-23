@@ -13,6 +13,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -88,12 +89,12 @@ var (
 	dataPath       = flag.String("data", "/data/core.json", "数据文件")
 	iface          = flag.String("iface", "homing0", "WireGuard 接口名")
 	outIface       = flag.String("out", "", "出口网卡（默认自动探测默认路由网卡）")
-	v4cidr         = flag.String("v4cidr", "10.8.0.0/24", "隧道 IPv4 网段")
+	v4cidr         = flag.String("v4cidr", "", "隧道 IPv4 网段（留空自动使用 10.8.0.0/24）")
 	v6cidr         = flag.String("v6cidr", "fdcc:ad94:bacf:61a4::cafe:0/112", "隧道 IPv6 网段")
-	addrV4         = flag.String("addr4", "10.8.0.1/24", "服务端 IPv4 地址")
+	addrV4         = flag.String("addr4", "", "服务端 IPv4 地址（留空按 -v4cidr 推导网络地址+1）")
 	addrV6         = flag.String("addr6", "fdcc:ad94:bacf:61a4::cafe:1/112", "服务端 IPv6 地址")
 	mtu            = flag.Int("mtu", 1420, "MTU")
-	dnsList        = flag.String("dns", "192.168.1.1", "下发给客户端的 DNS，逗号分隔")
+	dnsList        = flag.String("dns", "", "下发给客户端的 DNS，逗号分隔（留空自动探测默认网关）")
 	listen         = flag.Int("port", 51820, "WireGuard 监听端口")
 	probePort      = flag.Int("probe-port", 51824, "隧道内 UDP 探针回显端口（0=关闭）")
 	verbose        = flag.Bool("verbose", false, "打印详细日志")
@@ -107,6 +108,13 @@ var (
 
 	statMu sync.Mutex
 	stats  = map[string]peerStat{}
+)
+
+const (
+	// defaultTunnelIPv4CIDR 是未通过 -v4cidr/env 指定时的隧道 IPv4 网段。
+	defaultTunnelIPv4CIDR = "10.8.0.0/24"
+	// fallbackDNS 是自动探测默认网关失败时下发给客户端的兜底 DNS。
+	fallbackDNS = "223.5.5.5"
 )
 
 // ---------------- 持久化 ----------------
@@ -130,12 +138,9 @@ func loadData() error {
 			PrivateKey: priv.String(),
 			PublicKey:  priv.PublicKey().String(),
 			ListenPort: *listen,
-			IPv4CIDR:   *v4cidr,
 			IPv6CIDR:   *v6cidr,
-			AddressV4:  *addrV4,
 			AddressV6:  *addrV6,
 			MTU:        *mtu,
-			DNS:        splitList(*dnsList),
 			NextID:     1,
 		}
 	}
@@ -145,20 +150,36 @@ func loadData() error {
 	if data.MTU == 0 {
 		data.MTU = *mtu
 	}
+	// 下面只补空值：已有 core.json 中用户配置过的值不会被覆盖。
 	if data.IPv4CIDR == "" {
-		data.IPv4CIDR = *v4cidr
+		if *v4cidr != "" {
+			data.IPv4CIDR = *v4cidr
+		} else {
+			data.IPv4CIDR = defaultTunnelIPv4CIDR
+		}
 	}
 	if data.IPv6CIDR == "" {
 		data.IPv6CIDR = *v6cidr
 	}
 	if data.AddressV4 == "" {
-		data.AddressV4 = *addrV4
+		if *addrV4 != "" {
+			data.AddressV4 = *addrV4
+		} else {
+			// 未显式指定时按 -v4cidr/实际网段推导网络地址+1，如 10.8.0.1/24。
+			data.AddressV4 = addressFromCIDR(data.IPv4CIDR)
+		}
 	}
 	if data.AddressV6 == "" {
 		data.AddressV6 = *addrV6
 	}
 	if len(data.DNS) == 0 {
-		data.DNS = splitList(*dnsList)
+		if *dnsList != "" {
+			data.DNS = splitList(*dnsList)
+		} else if gw := detectDefaultGateway(); gw != "" {
+			data.DNS = []string{gw}
+		} else {
+			data.DNS = []string{fallbackDNS}
+		}
 	}
 	if data.NextID <= 0 {
 		data.NextID = 1
@@ -198,6 +219,91 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// ---------------- 默认值探测 ----------------
+
+// addressFromCIDR 返回 IPv4 网段的第一个可用地址（网络地址+1），形如 10.8.0.1/24。
+func addressFromCIDR(cidr string) string {
+	_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return ""
+	}
+	base, ok := ipv4Uint32(n.IP)
+	if !ok {
+		return ""
+	}
+	ones, bits := n.Mask.Size()
+	if bits != 32 || ones >= 32 {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d", ipv4String(base+1), ones)
+}
+
+// ipv4Uint32 把 IPv4 地址转成大端序 uint32，便于做网段偏移计算。
+func ipv4Uint32(ip net.IP) (uint32, bool) {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(ip4), true
+}
+
+// ipv4String 把大端序 uint32 还原成点分十进制 IPv4 地址。
+func ipv4String(v uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// detectDefaultGateway 从 /proc/net/route 解析默认路由的网关 IPv4 地址。
+// 不依赖 shell；非 host 网络（例如 bridge 网络没有默认路由）或读取失败时返回 ""。
+func detectDefaultGateway() string {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	best, bestMetric := "", -1
+	for i, line := range strings.Split(string(b), "\n") {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.Fields(line)
+		// 字段：Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+		if len(f) < 8 {
+			continue
+		}
+		// 默认路由：Destination 与 Mask 都是 0.0.0.0。
+		if f[1] != "00000000" || f[7] != "00000000" {
+			continue
+		}
+		flags, err := strconv.ParseUint(f[3], 16, 32)
+		if err != nil || flags&0x1 == 0 { // RTF_UP
+			continue
+		}
+		gw, ok := routeIPv4(f[2])
+		if !ok || gw == "0.0.0.0" {
+			continue
+		}
+		metric := 0
+		if m, err := strconv.Atoi(f[6]); err == nil {
+			metric = m
+		}
+		if bestMetric < 0 || metric < bestMetric {
+			best, bestMetric = gw, metric
+		}
+	}
+	return best
+}
+
+// routeIPv4 解析 /proc/net/route 中小端序十六进制表示的 IPv4 字段，如 0101A8C0 -> 192.168.1.1。
+func routeIPv4(s string) (string, bool) {
+	if len(s) != 8 {
+		return "", false
+	}
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", byte(v), byte(v>>8), byte(v>>16), byte(v>>24)), true
 }
 
 // ---------------- 系统配置（ip / iptables / sysctl） ----------------
@@ -474,10 +580,33 @@ func nextIPs() (string, string) {
 			used[i] = true
 		}
 	}
-	for i := 2; i < 254; i++ {
-		if !used[i] {
-			return fmt.Sprintf("10.8.0.%d", i), fmt.Sprintf("fdcc:ad94:bacf:61a4::cafe:%d", i)
+	// 网段以 data.IPv4CIDR / data.IPv6CIDR 为准（管理台可以改隧道网段，
+	// 改完后新建的客户端必须落在新网段里）。
+	base4 := uint32(0)
+	if _, n, err := net.ParseCIDR(data.IPv4CIDR); err == nil {
+		if v, ok := ipv4Uint32(n.IP); ok {
+			base4 = v
 		}
+	}
+	if base4 == 0 {
+		base4 = 0x0a080000 // 10.8.0.0
+	}
+	base6 := net.ParseIP("fdcc:ad94:bacf:61a4::cafe:0").To16()
+	if _, n, err := net.ParseCIDR(data.IPv6CIDR); err == nil {
+		if v := n.IP.To16(); v != nil {
+			base6 = v
+		}
+	}
+	for i := 2; i < 254; i++ {
+		if used[i] {
+			continue
+		}
+		v4 := ipv4String(base4 + uint32(i))
+		v6 := make(net.IP, 16)
+		copy(v6, base6)
+		last := binary.BigEndian.Uint16(v6[14:])
+		binary.BigEndian.PutUint16(v6[14:], last+uint16(i))
+		return v4, v6.String()
 	}
 	return "", ""
 }
@@ -663,23 +792,100 @@ func handleInterface(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out)
 	case "POST":
 		var req struct {
-			Port int `json:"port"`
+			Port     int      `json:"port"`
+			DNS      []string `json:"dns"`
+			IPv4CIDR string   `json:"ipv4Cidr"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Port < 1024 || req.Port > 65535 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "请求体不是合法 JSON"})
+			return
+		}
+		// port 省略（0）表示不修改；显式传入时保持原有 1024-65535 校验。
+		if req.Port != 0 && (req.Port < 1024 || req.Port > 65535) {
 			writeJSON(w, 400, map[string]string{"error": "端口范围 1024-65535"})
 			return
 		}
+		var newCIDR *net.IPNet
+		if strings.TrimSpace(req.IPv4CIDR) != "" {
+			n, err := parseTunnelIPv4CIDR(req.IPv4CIDR)
+			if err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+			newCIDR = n
+		}
+		var newDNS []string
+		for _, s := range req.DNS {
+			if v := strings.TrimSpace(s); v != "" {
+				newDNS = append(newDNS, v)
+			}
+		}
+
+		reconfigure := req.Port != 0
 		dataMu.Lock()
-		data.ListenPort = req.Port
+		if req.Port != 0 {
+			data.ListenPort = req.Port
+		}
+		if len(newDNS) > 0 {
+			// 用于之后新建客户端的默认 DNS；已有客户端各自保存的 DNS 不变。
+			data.DNS = newDNS
+		}
+		if newCIDR != nil {
+			cidr := newCIDR.String()
+			if cidr != data.IPv4CIDR {
+				base, _ := ipv4Uint32(newCIDR.IP)
+				ones, _ := newCIDR.Mask.Size()
+				data.IPv4CIDR = cidr
+				data.AddressV4 = fmt.Sprintf("%s/%d", ipv4String(base+1), ones)
+				// 现有客户端按当前顺序重新编号为 网络地址+2、+3……；IPv6 保持不变。
+				// 客户端配置因此需要重新下载，这是预期行为。
+				for i := range data.Clients {
+					data.Clients[i].IPv4 = ipv4String(base + 2 + uint32(i))
+				}
+				reconfigure = true
+			}
+		}
+		out := map[string]interface{}{
+			"ok":         true,
+			"port":       data.ListenPort,
+			"listenPort": data.ListenPort,
+			"ipv4Cidr":   data.IPv4CIDR,
+			"addresses":  []string{data.AddressV4, data.AddressV6},
+			"dns":        data.DNS,
+		}
 		dataMu.Unlock()
 		_ = saveData()
-		markConfigDirty()
-		_ = reconcile()
-		writeJSON(w, 200, map[string]interface{}{"ok": true, "port": req.Port})
+		if reconfigure {
+			markConfigDirty()
+			_ = reconcile()
+		}
+		writeJSON(w, 200, out)
 	default:
 		http.Error(w, "method not allowed", 405)
 	}
+}
+
+// parseTunnelIPv4CIDR 校验管理台提交的隧道 IPv4 网段：仅 IPv4、前缀 16~30、拒绝 0.0.0.0/0。
+// 返回规范化后的网络地址（主机位清零）。
+func parseTunnelIPv4CIDR(s string) (*net.IPNet, error) {
+	ip, n, err := net.ParseCIDR(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("IPv4 网段格式无效: %v", err)
+	}
+	if ip.To4() == nil || n.IP.To4() == nil {
+		return nil, fmt.Errorf("仅支持 IPv4 网段")
+	}
+	ones, bits := n.Mask.Size()
+	if bits != 32 {
+		return nil, fmt.Errorf("仅支持 IPv4 网段")
+	}
+	if ones == 0 {
+		return nil, fmt.Errorf("不能使用 0.0.0.0/0")
+	}
+	if ones < 16 || ones > 30 {
+		return nil, fmt.Errorf("IPv4 网段前缀长度需在 16~30 之间")
+	}
+	return n, nil
 }
 
 func handleUserConfig(w http.ResponseWriter, r *http.Request) {
@@ -788,7 +994,7 @@ func startProbeEcho() {
 		log.Printf("隧道探针端口 %d 监听失败: %v", *probePort, err)
 		return
 	}
-	log.Printf("隧道探针回显 listening on %s（客户端探测 10.8.0.1:%d）", conn.LocalAddr(), *probePort)
+	log.Printf("隧道探针回显 listening on %s（客户端探测 %s:%d）", conn.LocalAddr(), bindIP, *probePort)
 	go func() {
 		buf := make([]byte, 512)
 		for {
@@ -817,8 +1023,8 @@ func main() {
 	if err := reconcile(); err != nil {
 		log.Fatalf("初始化隧道失败: %v", err)
 	}
-	log.Printf("homing-core 就绪：接口 %s，端口 %d，客户端 %d 个，NAT 出口 %s",
-		*iface, data.ListenPort, len(data.Clients), detectOutIface())
+	log.Printf("homing-core 就绪：接口 %s，端口 %d，IPv4 网段 %s（服务端 %s），DNS %s，客户端 %d 个，NAT 出口 %s",
+		*iface, data.ListenPort, data.IPv4CIDR, data.AddressV4, strings.Join(data.DNS, ","), len(data.Clients), detectOutIface())
 
 	startProbeEcho()
 
