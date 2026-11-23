@@ -1,0 +1,13 @@
+#!/bin/sh
+# homing-client prerm：卸载/升级前先把隧道断掉，避免残留路由和 IP 规则
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if [ -x /usr/libexec/homing/homing-helper ]; then
+      /usr/libexec/homing/homing-helper down >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

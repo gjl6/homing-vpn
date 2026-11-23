@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=归途客户端
+Name[zh_CN]=归途客户端
+GenericName=归途隧道网关客户端
+Comment=连接自建归途网关：全部流量回到网关再出网，双栈隧道、动态端点自动跟随
+Comment[en]=Homing gateway client: route all traffic back through your gateway, dual-stack tunnel, auto-follow dynamic endpoints
+Exec=homing-gui
+Icon=homing
+Terminal=false
+Categories=Network;VPN;Security;
+Keywords=vpn;gateway;homing;隧道;网关;
+StartupNotify=true
+StartupWMClass=homing_gui.py

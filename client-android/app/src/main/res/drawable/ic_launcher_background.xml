@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标背景：与 UOS 图标同款的深蓝渐变 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="315"
+        android:endColor="#1a365d"
+        android:startColor="#2b6cb0"
+        android:type="linear" />
+</shape>

@@ -1,0 +1,20 @@
+Package: homing-client
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: 归途 Homing <noreply@example.com>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.7), python3-gi, gir1.2-gtk-3.0, iproute2, kmod, pkexec | policykit-1
+Recommends: systemd-resolved | resolvconf
+Section: net
+Priority: optional
+Homepage: https://example.com/homing
+Description: 归途 Homing 客户端（双栈隧道网关桌面客户端）
+ 自研归途网关的桌面客户端：把全部流量送回本地网关再出网，
+ 隧道双栈（IPv4 + IPv6），并支持从 DNS TXT 公告板自动发现、
+ 热切换家宽 STUN 打洞得到的动态端点（服务端端口变化无需重新导入配置）。
+ .
+ 特点：
+  * 图形界面（Gtk3），一键连接/断开；
+  * 导入标准 .conf 配置；
+  * 端点热切换不重建隧道、不断流；
+  * 长时间不握手会自动轮换候选端点自愈。

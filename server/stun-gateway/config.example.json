@@ -1,0 +1,23 @@
+{
+  "stunServers": ["stun.miwifi.com:3478", "stun.chat.bilibili.com:3478", "stun.l.google.com:19302"],
+  "notifyURL": "",
+  "v6": { "enabled": true, "address": "", "port": 500 },
+  "dns": {
+    "enabled": false,
+    "provider": "cloudflare",
+    "record": "_wg.example.com",
+    "domain": "example.com",
+    "valueTpl": "v1;v4={{endpoint}};v6={{v6endpoint}};ts={{ts}}",
+    "autoCreate": true,
+    "cloudflareToken": "",
+    "cloudflareZoneId": "",
+    "aliyunAccessKeyId": "",
+    "aliyunAccessKeySecret": "",
+    "dnspodTokenId": "",
+    "dnspodToken": "",
+    "customUrl": "",
+    "customMethod": "POST",
+    "customHeaders": "{}",
+    "customBody": "{\"record\":\"{{record}}\",\"value\":\"{{value}}\"}"
+  }
+}

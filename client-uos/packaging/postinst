@@ -1,0 +1,42 @@
+#!/bin/sh
+# homing-client postinst
+set -e
+
+case "$1" in
+  configure)
+    # 1) 权限
+    chmod 0755 /usr/libexec/homing/homing-helper || true
+    chmod 0644 /usr/share/polkit-1/actions/org.homing.helper.policy || true
+    chmod 0755 /usr/bin/homing /usr/bin/homing-gui 2>/dev/null || true
+
+    # 2) 运行目录 + 日志目录
+    mkdir -p /run/homing
+    chmod 0755 /run/homing
+    mkdir -p /var/log/homing
+    chmod 0755 /var/log/homing
+    [ -f /var/log/homing/homing.log ] && chmod 0644 /var/log/homing/homing.log || true
+
+    # 3) 内核 WireGuard 模块自检（失败只提示，不阻断安装）
+    if ! grep -q wireguard /proc/modules 2>/dev/null; then
+      if modprobe wireguard >/dev/null 2>&1; then
+        echo "homing-client: 已加载内核 wireguard 模块"
+      else
+        cat >&2 <<'EOF'
+homing-client: 警告：无法加载内核 wireguard 模块。
+  请确认内核版本 >= 5.6（UOS 20 SP1 / UOS 23 均满足），
+  或安装 wireguard-dkms 后重试：modprobe wireguard
+EOF
+      fi
+    fi
+
+    # 4) 桌面数据库
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+      gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

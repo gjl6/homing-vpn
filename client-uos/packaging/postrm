@@ -1,0 +1,22 @@
+#!/bin/sh
+# homing-client postrm
+set -e
+
+case "$1" in
+  purge|remove)
+    rm -rf /run/homing 2>/dev/null || true
+    rm -f /etc/resolv.conf.homing.bak 2>/dev/null || true
+    ;;
+esac
+
+case "$1" in
+  purge)
+    rm -rf /var/log/homing 2>/dev/null || true
+    ;;
+esac
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
+fi
+
+exit 0

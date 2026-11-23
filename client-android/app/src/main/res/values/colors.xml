@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="homing_primary">#006A60</color>
+    <color name="homing_on_primary">#FFFFFF</color>
+    <color name="homing_primary_container">#74F8E5</color>
+    <color name="homing_on_primary_container">#00201C</color>
+    <color name="homing_secondary">#4A635F</color>
+    <color name="homing_secondary_container">#CCE8E2</color>
+    <color name="homing_surface">#FAFDFB</color>
+    <color name="homing_surface_variant">#DAE5E2</color>
+    <color name="homing_outline">#6F7977</color>
+    <color name="homing_text_secondary">#5F6B68</color>
+    <color name="status_ok">#1B7F4B</color>
+    <color name="status_off">#B3261E</color>
+    <color name="status_warn">#B26A00</color>
+</resources>

@@ -1,0 +1,121 @@
+#!/bin/bash
+# homing —— 归途 Homing 客户端命令行工具（图形界面 homing-gui 的精简版，适合排障/远程）
+set -u
+
+HELPER=/usr/libexec/homing/homing-helper
+GUI=/usr/bin/homing-gui
+PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/homing/profiles"
+DEFAULT_PROFILE="$PROFILE_DIR/default.json"
+
+usage() {
+  cat <<EOF
+homing —— 归途 Homing 客户端 (v2.0.0)
+
+用法:
+  homing gui                       打开图形界面
+  homing import <file.conf> [名字] 导入配置文件到 ~/.config/homing/profiles/
+  homing up [profile.json]         连接（默认 default.json，需要管理员授权）
+  homing down                      断开
+  homing status                    查看状态（读 /run/homing/status.json）
+  homing discover [profile.json]   查询 DNS TXT 公告板里的最新端点
+  homing endpoint <host:port>      热换端点（不重建隧道，需要管理员授权）
+  homing log [-f]                  查看隧道日志（-f 持续跟踪）
+  homing autostart [on|off|status] 开机自动连接（on 使用当前默认配置，需要管理员授权）
+  homing version                   版本
+EOF
+}
+
+need_helper() {
+  if [ ! -x "$HELPER" ]; then
+    echo "错误: 找不到 $HELPER，请确认 homing-client 已正确安装" >&2
+    exit 1
+  fi
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  gui)
+    exec "$GUI"
+    ;;
+  version|--version|-v)
+    need_helper; exec "$HELPER" version
+    ;;
+  status)
+    if [ -r /run/homing/status.json ]; then
+      cat /run/homing/status.json
+      echo
+    else
+      echo "未连接（没有 /run/homing/status.json）"
+      exit 1
+    fi
+    ;;
+  up)
+    need_helper
+    profile="${1:-$DEFAULT_PROFILE}"
+    [ -f "$profile" ] || { echo "找不到配置: $profile（可先 homing import 你的 .conf）" >&2; exit 1; }
+    exec pkexec "$HELPER" up --daemon --profile "$profile"
+    ;;
+  down)
+    need_helper
+    exec pkexec "$HELPER" down
+    ;;
+  endpoint)
+    need_helper
+    [ -n "${1:-}" ] || { echo "用法: homing endpoint host:port" >&2; exit 2; }
+    exec pkexec "$HELPER" set-endpoint "$1"
+    ;;
+  discover)
+    need_helper
+    profile="${1:-$DEFAULT_PROFILE}"
+    [ -f "$profile" ] || { echo "找不到配置: $profile" >&2; exit 1; }
+    exec "$HELPER" discover --profile "$profile"
+    ;;
+  autostart)
+    need_helper
+    sub="${1:-status}"
+    case "$sub" in
+      on)
+        p="${2:-$DEFAULT_PROFILE}"
+        [ -f "$p" ] || { echo "找不到配置: $p" >&2; exit 1; }
+        exec pkexec "$HELPER" autostart on --profile "$p"
+        ;;
+      off)
+        exec pkexec "$HELPER" autostart off
+        ;;
+      *)
+        exec "$HELPER" autostart status
+        ;;
+    esac
+    ;;
+  log)
+    if [ ! -r /var/log/homing/homing.log ]; then
+      echo "还没有日志：/var/log/homing/homing.log（先连接一次隧道）" >&2
+      exit 1
+    fi
+    if [ "${1:-}" = "-f" ]; then
+      exec tail -f -n 100 /var/log/homing/homing.log
+    fi
+    tail -n 100 /var/log/homing/homing.log
+    ;;
+  import)
+    need_helper
+    conf="${1:-}"
+    [ -f "$conf" ] || { echo "用法: homing import <file.conf> [名字]" >&2; exit 2; }
+    name="${2:-$(basename "$conf" .conf)}"
+    mkdir -p "$PROFILE_DIR"
+    out="$PROFILE_DIR/$name.json"
+    "$HELPER" parse-conf --name="$name" < "$conf" > "$out" || { echo "解析失败" >&2; rm -f "$out"; exit 1; }
+    echo "已导入: $out"
+    echo "连接: homing up \"$out\""
+    ;;
+  help|-h|--help|"")
+    usage
+    ;;
+  *)
+    echo "未知命令: $cmd" >&2
+    usage
+    exit 2
+    ;;
+esac

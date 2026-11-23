@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.jar binary
+*.jks binary
+*.keystore binary
+*.apk binary
+*.deb binary
+*.zip binary
+*.gz binary
+
+*.bat text eol=crlf
+gradlew text eol=lf

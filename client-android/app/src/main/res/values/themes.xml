@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Homing" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/homing_primary</item>
+        <item name="colorOnPrimary">@color/homing_on_primary</item>
+        <item name="colorPrimaryContainer">@color/homing_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/homing_on_primary_container</item>
+        <item name="colorSecondary">@color/homing_secondary</item>
+        <item name="colorSecondaryContainer">@color/homing_secondary_container</item>
+        <item name="colorSurface">@color/homing_surface</item>
+        <item name="colorSurfaceVariant">@color/homing_surface_variant</item>
+        <item name="colorOutline">@color/homing_outline</item>
+        <item name="android:statusBarColor">@color/homing_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/homing_surface</item>
+    </style>
+</resources>

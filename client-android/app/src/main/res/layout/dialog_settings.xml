@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingHorizontal="20dp"
+    android:paddingTop="4dp">
+
+    <TextView
+        android:id="@+id/textVersion"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="6dp"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:textSize="12sp" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/swAutoStart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="开机自动连接（重启后自动拉起隧道）" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/swAutoConnectImport"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="扫码/粘贴导入后立即连接" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/swAutoFollowDefault"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="公告板默认自动跟随（配置里未指定时）" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnBattery"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="后台常驻" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnNotification"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="通知权限" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLogs"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="查看日志" />
+    </LinearLayout>
+</LinearLayout>

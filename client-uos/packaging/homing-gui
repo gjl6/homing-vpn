@@ -1,0 +1,3 @@
+#!/bin/sh
+# homing-gui 启动器
+exec python3 /usr/share/homing/gui/homing_gui.py "$@"

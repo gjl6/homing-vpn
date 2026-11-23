@@ -1,0 +1,41 @@
+{
+  "name": "示例：家里网关",
+  "privateKey": "<你的客户端私钥，见手机/配置下发>",
+  "addresses": [
+    "10.8.0.2/32",
+    "fdcc:ad94:bacf:61a4::cafe:2/128"
+  ],
+  "mtu": 1420,
+  "dns": [
+    "192.168.1.1"
+  ],
+  "peers": [
+    {
+      "publicKey": "<网关公钥>",
+      "presharedKey": "<预共享密钥，可留空>",
+      "allowedIps": [
+        "0.0.0.0/0",
+        "::/0"
+      ],
+      "endpoint": "203.0.113.10:9612",
+      "persistentKeepalive": 25
+    }
+  ],
+  "discovery": {
+    "enabled": true,
+    "record": "vpn.example.com",
+    "autoFollow": true,
+    "preferred": "auto",
+    "interval": 30
+  },
+  "probe": {
+    "enabled": true,
+    "interval": 10,
+    "idleInterval": 30,
+    "idleAfter": 5,
+    "failures": 1,
+    "timeoutMs": 1500,
+    "recoveryInterval": 5,
+    "softGrace": 30
+  }
+}

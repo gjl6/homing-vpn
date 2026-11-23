@@ -1,0 +1,6 @@
+**/bin/
+**/*.md
+**/Dockerfile
+**/.dockerignore
+**/*.json.bak
+**/*.log

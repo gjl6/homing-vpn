@@ -1,0 +1,213 @@
+# 归途（Homing）网关服务栈
+#
+# 一个镜像（homing:1.0.0）包含全部组件，靠 command 选择角色：
+#   core   隧道核心（内核隧道 + NAT + 客户端管理 API）
+#   stun   打洞 / 中继
+#   admin  管理台（:51822，自带账户 / 2FA）
+#   plumb  可选出口：按客户端把 IPv4 流量导入宿主机 TUN
+#   proxy  可选出口：remote 模式的本机透明代理
+#
+# 所有服务都使用 host 网络，因此：
+#   - 不再需要 ports 映射，core 直接监听宿主机 UDP 端口；
+#   - STUN 的 target 127.0.0.1:CORE_PORT 就是 core 本身；
+#   - 出口能看到真实客户端源地址（10.8.0.x），可按客户端开关分流。
+# 代价：core 需要 privileged 来写宿主机 /proc/sys（host 网络下 Docker 不允许
+# 通过 sysctls 设置 net.*），iptables 规则也直接写在宿主机命名空间。
+#
+# 配置见 .env（从 .env.example 复制）。
+#   docker compose build
+#   docker compose up -d
+# 可选出口：
+#   docker compose --profile egress up -d homing-egress [homing-proxy]
+#   （通常不需要手动执行，管理台「出口」页会按需启停）
+
+services:
+  # ---------------------------------------------------------------------------
+  # 归途隧道核心（自研）
+  # ---------------------------------------------------------------------------
+  homing-core:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+    container_name: homing-core
+    restart: unless-stopped
+    network_mode: host
+    # host 网络下需要写宿主机 /proc/sys/net/*（ip_forward 等），Docker 的
+    # sysctls 不允许与 host 网络混用，因此这里给 privileged。
+    privileged: true
+    command:
+      - "core"
+      - "-api"
+      - "127.0.0.1:51821"
+      - "-data"
+      - "/data/core.json"
+      - "-iface"
+      - "homing0"
+      - "-port"
+      - "${CORE_PORT:-51820}"
+      - "-dns"
+      - "${CORE_DNS:-192.168.1.1}"
+      - "-reconcile"
+      - "10s"
+      - "-probe-port"
+      - "${PROBE_PORT:-51824}"
+    volumes:
+      - ./core-data:/data
+      - /lib/modules:/lib/modules:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:51821/healthz || exit 1"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # 自研 STUN 打洞 / 中继（host 网络，直接拿真实公网映射）
+  # 端口：51830/udp 打洞入口，51831/tcp 状态接口（仅本机），18081/tcp 自检页
+  # ---------------------------------------------------------------------------
+  homing-stun:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+    container_name: homing-stun
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./stun-data:/stun-data
+    command:
+      - "stun"
+      - "-listen"
+      - ":51830"
+      - "-target"
+      - "127.0.0.1:${CORE_PORT:-51820}"
+      - "-state-file"
+      - "/stun-data/endpoint.json"
+      - "-http"
+      - "127.0.0.1:51831"
+      - "-public-http"
+      - ":18081"
+      - "-upnp"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:51831/healthz || exit 1"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # 自研管理台（:51822）：栈状态 + 客户端管理 + 公告板发布；自带登录 + TOTP 2FA
+  # 需要 docker CLI / compose 来重建出口容器，所以挂载 docker.sock
+  # ---------------------------------------------------------------------------
+  homing-admin:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+    container_name: homing-admin
+    restart: unless-stopped
+    network_mode: host
+    command: ["admin"]
+    volumes:
+      - ./stun-data:/stun-data
+      - ${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}:/vpn
+      - ${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}:${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      VPN_DIR: "${VPN_HOST_DIR:?请在 .env 设置项目绝对路径 VPN_HOST_DIR}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?请在 .env 设置 ADMIN_PASSWORD}"
+      ADMIN_LISTEN: "${ADMIN_LISTEN:-:51822}"
+      CORE_BASE: "http://127.0.0.1:51821"
+      STUN_STATUS: "http://127.0.0.1:51831"
+      CORE_LAN: "${CORE_LAN:-192.168.1.0/24}"
+      CORE_DNS: "${CORE_DNS:-192.168.1.1}"
+      CORE_PORT: "${CORE_PORT:-51820}"
+      CLIENT_NET: "${CLIENT_NET:-10.8.0.0/24}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:$${ADMIN_LISTEN##*:}/healthz || exit 1"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # 可选：全局出口（profile: egress），由管理台「出口」页启停
+  #
+  #   tun   模式：把开启代理的客户端 IPv4 流量策略路由到宿主机已有 TUN；
+  #                 要求宿主机 TUN 代理已运行，TUN 设备名在管理台配置。
+  #   remote 模式：同时启动 homing-proxy（本机透明代理），把流量转给远端
+  #                 HTTP/SOCKS5 代理端口；适合代理运行在另一台主机。
+  #
+  # 启动：docker compose --profile egress up -d homing-egress [homing-proxy]
+  # 停止：docker compose --profile egress stop homing-egress homing-proxy
+  # ---------------------------------------------------------------------------
+  homing-egress:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+    container_name: homing-egress
+    profiles: ["egress"]
+    restart: unless-stopped
+    network_mode: host
+    # 需要写 /proc/sys/net/ipv4/conf/<tun>/rp_filter、修改宿主机 ip rule/iptables
+    privileged: true
+    command: ["plumb"]
+    volumes:
+      - ./stun-data:/stun-data
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # 可选：remote 出口的本机透明代理（profile: egress）
+  # 管理台生成 /stun-data/proxy/config.yaml 后启动；需要 TUN + host 网络。
+  # ---------------------------------------------------------------------------
+  homing-proxy:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+    container_name: homing-proxy
+    profiles: ["egress"]
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    command: ["proxy"]
+    volumes:
+      - ./stun-data:/stun-data
+    stop_grace_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

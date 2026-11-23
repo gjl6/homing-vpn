@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>归途 Homing</vendor>
+  <vendor_url>https://example.com/homing</vendor_url>
+
+  <action id="org.homing.helper.up">
+    <description>建立 归途 Homing 隧道</description>
+    <description xml:lang="zh_CN">建立 归途 Homing 隧道</description>
+    <message>需要管理员权限来建立 VPN 隧道</message>
+    <message xml:lang="zh_CN">需要管理员权限来建立 VPN 隧道</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/homing/homing-helper</annotate>
+  </action>
+</policyconfig>

@@ -1,0 +1,46 @@
+# ---- 敏感文件：不要提交 ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 运行时数据（含服务端/客户端密钥）
+core-data/
+stun-data/
+config/
+backup/
+*.log
+
+# Android 签名与构建产物
+client-android/app/keystore/
+client-android/keystore.properties
+client-android/app/build/
+client-android/build/
+client-android/.gradle/
+client-android/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# UOS 构建产物
+client-uos/dist/
+client-uos/bin/
+__pycache__/
+*.pyc
+
+# Go 构建产物与本机 vendor 缓存
+server/*/bin/
+server/homing-core/vendor/
+server/gateway-admin/vendor/
+
+# 编辑器 / 系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.exe
