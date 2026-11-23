@@ -118,6 +118,7 @@ docker compose up -d
 
 > 管理台需要挂载 `docker.sock` 来在线重建容器；`VPN_HOST_DIR` 必须等于 compose 所在目录。
 > 构建时会额外拉取一个代理内核基础镜像（仅用于可选的远程代理出口），离线环境可先 `docker pull` 或用 `--build-arg` 指定。
+> 如果构建时访问不了 `proxy.golang.org`（国内网络常见），在 `.env` 加一行 `GO_PROXY=https://goproxy.cn,direct` 再构建。
 
 首次启动后：
 

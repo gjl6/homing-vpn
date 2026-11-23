@@ -32,6 +32,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
     container_name: homing-core
     restart: unless-stopped
     network_mode: host
@@ -80,6 +81,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
     container_name: homing-stun
     restart: unless-stopped
     network_mode: host
@@ -121,6 +123,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
     container_name: homing-admin
     restart: unless-stopped
     network_mode: host
@@ -170,6 +173,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
     container_name: homing-egress
     profiles: ["egress"]
     restart: unless-stopped
@@ -197,6 +201,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
     container_name: homing-proxy
     profiles: ["egress"]
     restart: unless-stopped

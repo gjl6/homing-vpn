@@ -14,6 +14,8 @@
 # 镜像，保证发布物仍然只有一个 homing 镜像。可用 --build-arg MIHOMO_IMAGE=... 固定版本。
 
 ARG MIHOMO_IMAGE=metacubex/mihomo:v1.19.34
+# 受限网络下可覆盖 Go 模块代理，例如 --build-arg GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://proxy.golang.org,direct
 
 # ---------- 构建 homing-core ----------
 FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build-core
@@ -21,6 +23,8 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
 ENV CGO_ENABLED=0
+ARG GOPROXY
+ENV GOPROXY=${GOPROXY}
 COPY homing-core/go.mod homing-core/go.sum ./
 RUN go mod download
 COPY homing-core/*.go ./
@@ -44,6 +48,8 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
 ENV CGO_ENABLED=0
+ARG GOPROXY
+ENV GOPROXY=${GOPROXY}
 COPY gateway-admin/go.mod gateway-admin/go.sum ./
 RUN go mod download
 COPY gateway-admin/main.go gateway-admin/ui.html ./
