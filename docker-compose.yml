@@ -1,6 +1,6 @@
 # 归途（Homing）网关服务栈
 #
-# 一个镜像（homing:1.2.1）包含全部组件，靠 command 选择角色：
+# 一个镜像（homing:1.2.2）包含全部组件，靠 command 选择角色：
 #   core   隧道核心（内核隧道 + NAT + 客户端管理 API）
 #   stun   打洞 / 中继
 #   admin  管理台（:51822，自带账户 / 2FA）

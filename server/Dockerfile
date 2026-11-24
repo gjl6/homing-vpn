@@ -108,4 +108,7 @@ VOLUME ["/data"]
 
 # tini 作为所有模式的 PID 1：负责收尸和信号转发。
 # all 模式下 homing-init 再用 runit 监督子进程；分容器模式行为不变。
+# 默认 CMD 为 all：NAS / Portainer 图形界面不给“命令”时也能直接进单容器模式，
+# 否则入口收到空参数会静默退出，表现为“一直重启、没有日志”。
 ENTRYPOINT ["/sbin/tini", "-g", "--", "/usr/local/bin/homing"]
+CMD ["all"]

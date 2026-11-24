@@ -191,8 +191,8 @@ docker compose -f docker-compose.single.yml up -d --build
 
 | 位置 | 填什么 |
 | --- | --- |
-| 镜像 | `gjl168168/homing:1.2.1`（或导入离线 tar 包） |
-| 命令 / CMD | `all`（必须，选择单容器模式） |
+| 镜像 | `gjl168168/homing:1.2.2`（或导入离线 tar 包） |
+| 命令 / CMD | `all`；1.2.2 起也可以留空，镜像默认就是 `all` |
 | 网络 | `host`（使用与宿主机相同的网络） |
 | 端口设置 | 会自动显示 `51822/tcp`（管理台）、`18081/tcp`（公网自检页）、`51820/udp`（隧道）；host 网络下不需要再做映射，能看到即可 |
 | 存储空间 | 容器路径 `/data`，宿主机任选一个目录（NAS 共享文件夹也可以）；不需要 chown |
@@ -205,6 +205,8 @@ docker compose -f docker-compose.single.yml up -d --build
 启动后浏览器打开 `http://<NAS 局域网 IP>:51822`，用 `admin / admin123` 登录并立即改密码。
 
 > 图形界面里找不到“设备 / 安全选项”输入框也可以先不加：隧道和打洞不受影响，只有“远程代理出口”需要 `/dev/net/tun`，自动写 sysctl 需要 `systempaths=unconfined`（可用宿主机 sysctl 代替）。
+>
+> 容器“一直重启、没有日志”通常是图形界面没传命令，入口收到空参数后静默退出；1.2.2 起镜像默认 `all`，导入新镜像即可，或在“命令”栏手动填 `all`。
 
 日常运维命令：
 

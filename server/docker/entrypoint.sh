@@ -40,6 +40,10 @@ case "$1" in
     exec /usr/local/bin/mihomo -d /data/proxy -f /data/proxy/config.yaml "$@"
     ;;
   *)
+    # 图形界面没传任何命令时，默认进单容器 all 模式，避免静默退出导致反复重启。
+    if [ "$#" -eq 0 ]; then
+      exec /usr/local/bin/homing-init
+    fi
     exec "$@"
     ;;
 esac
