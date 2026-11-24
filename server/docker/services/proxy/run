@@ -1,4 +1,4 @@
 #!/bin/sh
-# proxy：remote 出口的本机透明代理 runner；按 /data/egress.json 启停 mihomo。
+# proxy：remote 出口的本机透明代理 runner；mihomo 依赖容器的 NET_ADMIN。
 set -eu
 exec /usr/local/bin/homing-proxy-runner

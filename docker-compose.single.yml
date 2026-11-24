@@ -12,12 +12,13 @@
 #   cp .env.example .env     # 可选
 #   docker compose -f docker-compose.single.yml up -d --build
 #
-# 说明：单容器不再需要 privileged。
-# - core/plumber/proxy 需要 host 网络管理权限：NET_ADMIN；
-# - 初始化脚本需要把 /data 归 root 并修正权限：CHOWN；
-# - systempaths=unconfined 只用于让 core 能写宿主机 /proc/sys（Docker 默认把 /proc/sys 挂成只读）；
+# 说明：单容器不使用 privileged，也不再 chown /data。
+# - 容器内以 root UID 运行，但 capability 只有 NET_ADMIN + DAC_OVERRIDE：
+#   NET_ADMIN 用于 WireGuard/iptables，DAC_OVERRIDE 用于在任意属主的 /data
+#   上读写（不再需要 CHOWN，也不需要 root 初始化 chown）。
+# - systempaths=unconfined 只用于让 core 能写宿主机 /proc/sys（两种 sysctl 方式都支持）；
 # - /dev/net/tun 只给 remote 出口的 mihomo 用。
-# admin/stun 启动时用 capsh 清空 capabilities；core 启动时只保留 NET_ADMIN。
+# 这样容器内不再有“chown /data”的初始化逻辑，数据目录的属主可以是 NAS 上的任意用户。
 
 services:
   homing:
@@ -32,11 +33,7 @@ services:
     restart: unless-stopped
     network_mode: host
     cap_drop: [ALL]
-    # CHOWN：初始化时把宿主机用户创建的 /data 归 root；
-    # SETPCAP：让 capsh 能安全地删除子进程的 capability bounding set；
-    # NET_ADMIN：core/plumber/proxy 需要的网络管理权限。
-    # core 启动时会再降到只剩 NET_ADMIN，admin/stun 会清空全部 capability。
-    cap_add: [NET_ADMIN, CHOWN, SETPCAP]
+    cap_add: [NET_ADMIN, DAC_OVERRIDE]
     security_opt:
       - systempaths=unconfined
     devices:

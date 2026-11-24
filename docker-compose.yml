@@ -37,12 +37,10 @@ services:
     container_name: homing-core
     restart: unless-stopped
     network_mode: host
-    # host 网络下需要写宿主机 /proc/sys/net/*（ip_forward 等）。Docker 的
-    # sysctls 不允许与 host 网络混用，所以用 systempaths=unconfined 放开 /proc/sys，
-    # 再只给 core 需要的 NET_ADMIN；CHOWN/SETPCAP 仅用于初始化时修正 /data
-    # 属主并在启动 core 前把 capability 降到 NET_ADMIN。
+    # core 以容器内 root UID 运行，但只保留 NET_ADMIN + DAC_OVERRIDE；
+    # DAC_OVERRIDE 用于读写任意属主的 /data，不再需要 chown/CHOWN。
     cap_drop: [ALL]
-    cap_add: [NET_ADMIN, CHOWN, SETPCAP]
+    cap_add: [NET_ADMIN, DAC_OVERRIDE]
     security_opt:
       - systempaths=unconfined
     command:

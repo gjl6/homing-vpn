@@ -64,7 +64,7 @@ flowchart LR
 隧道核心、打洞、管理台是三个进程，通过本地 HTTP API 和配置文件协作：管理台挂了不影响已建立的隧道，隧道核心重启也不需要重新配置管理台。一个镜像用 `command` 切换角色，发布、升级、回滚都只涉及一个产物。
 
 **2. 服务端统一 host 网络。**
-按客户端做策略路由必须看到真实源地址（`10.8.0.x`），容器网络会把源地址 NAT 成网桥地址，分不出是谁。host 网络还让打洞进程直接拿到公网映射、让出口规则直接写在宿主机命名空间。代价是 core 需要 `NET_ADMIN` 写宿主机 `/proc/sys` 和 iptables；它不再使用 `privileged`，只保留这一个 capability。
+按客户端做策略路由必须看到真实源地址（`10.8.0.x`），容器网络会把源地址 NAT 成网桥地址，分不出是谁。host 网络还让打洞进程直接拿到公网映射、让出口规则直接写在宿主机命名空间。代价是 core 需要 `NET_ADMIN` 写 iptables；它不使用 `privileged`，容器内只保留 `NET_ADMIN` + `DAC_OVERRIDE`。sysctl 由宿主机预置，或 core 启动时检查并在没有权限时提示。
 
 **3. 没有公网 IP 时，自己解决端点发现问题。**
 打洞进程监听一个 UDP 端口，把公网映射地址通过隧道内 API 交给管理台，再下发给客户端；同时支持 UPnP、中继转发和端点变化通知。客户端拿到的是"当前可用端点"，不是写死的 IP，所以宽带重播、手机切网后能自动恢复。打洞端口**默认随机、不写死**，遇到端口被限/被封可以在管理台随时换一个，重新做 NAT 映射并发布新端点。
@@ -150,7 +150,7 @@ net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 ```
 
-如果 core 没有权限写 `/proc/sys`（例如容器以非 root 运行且没有 `DAC_OVERRIDE`），它不会阻止启动，只会在日志里打印一次提示。此时推荐在宿主机持久化：
+如果 core 没有权限写 `/proc/sys`（例如容器没有 `DAC_OVERRIDE`，或 `/proc/sys` 被挂只读），它不会阻止启动，只会在日志里打印一次提示。此时推荐在宿主机持久化：
 
 ```ini
 # /etc/sysctl.d/99-homing.conf
@@ -175,8 +175,15 @@ docker compose -f docker-compose.single.yml up -d --build
 - 管理台**不挂 `docker.sock`**，也不挂部署目录；
 - 改隧道端口、打洞端口、启用/停用出口都由管理台写配置文件，内置 runner 自动重启对应进程；
 - 优点是部署简单、权限面小；代价是升级/重启会同时影响全部角色（通常只断几秒）；
-- 不需要 `privileged`：容器只保留 `NET_ADMIN` / `CHOWN` / `SETPCAP`，通过 `systempaths=unconfined` 允许写 `/proc/sys`；core 启动时再降到只剩 `NET_ADMIN`，admin/stun 的 capabilities 被清空。
+- 不使用 `privileged`，也不再 chown `/data`：容器内只保留 `NET_ADMIN`（网络）和 `DAC_OVERRIDE`（读写任意属主的数据目录）；
 - 宿主机需要已加载 `wireguard` 内核模块（`modprobe wireguard`）。
+
+数据目录直接映射 NAS 上的现有文件夹即可，不需要预先 chown：
+
+```bash
+mkdir -p data
+docker compose -f docker-compose.single.yml up -d --build
+```
 
 日常运维命令：
 
@@ -228,6 +235,8 @@ data/
 bash scripts/migrate-data.sh        # core-data/ + stun-data/ → data/
 docker compose up -d --force-recreate
 ```
+
+容器通过 `DAC_OVERRIDE` 读写数据目录，不需要预先 chown；如果介意这个 capability，可以在宿主机上把数据目录属主改成容器运行用户（默认 root），但那属于可选加固。
 
 
 ## 客户端
@@ -320,7 +329,8 @@ tar czf homing-backup-$(date +%F).tgz data .env docker-compose.yml
 - 管理台只在内网或隧道内访问，**不要把 51822 暴露到公网**；远程管理先连隧道，再访问 `http://10.8.0.1:51822`。
 - 每台设备独立密钥；设备丢失立即在管理台停用或删除。
 - `data/`、`.env`、客户端签名密钥都不要进 git。
-- core 只保留 `NET_ADMIN`（不再 `privileged`）；单容器模式下 admin/stun 的 capabilities 已清空。给宿主机权限时请按 README 的 compose 配置，不要额外加 `privileged`。
+- core 不再 `privileged`；单容器只保留 `NET_ADMIN` + `DAC_OVERRIDE`，不再有 chown `/data` 的初始化逻辑。给宿主机权限时请按 README 的 compose 配置，不要额外加 `privileged`。
+- `/data` 的属主不需要固定，容器内也不会修改它。
 - 发现安全问题请私下联系维护者，不要公开 Issue。
 
 ## 开发

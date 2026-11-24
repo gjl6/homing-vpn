@@ -1,4 +1,4 @@
 #!/bin/sh
-# plumb：可选出口策略路由 runner；出口配置变化时重启 plumber 让新配置生效。
+# plumb：出口策略路由 runner；ip / iptables 依赖容器的 NET_ADMIN。
 set -eu
 exec /usr/local/bin/homing-plumb-runner

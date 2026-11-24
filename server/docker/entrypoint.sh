@@ -16,13 +16,8 @@ case "$1" in
     ;;
   core)
     shift
-    # 多容器模式下 core 不再是 privileged：先把宿主机用户创建的 /data 归 root，
-    # 再由 homing-capdrop 把 capability 降到只剩 NET_ADMIN。
-    if [ -d /data ]; then
-      chown -R 0:0 /data 2>/dev/null || true
-      chmod -R u+rwX /data 2>/dev/null || true
-    fi
-    exec /usr/local/bin/homing-capdrop cap_chown,cap_setpcap /usr/local/bin/homing-core "$@"
+    # core 以容器内 root UID 运行，capability 由 compose 限定为 NET_ADMIN + DAC_OVERRIDE。
+    exec /usr/local/bin/homing-core "$@"
     ;;
   stun)
     shift
