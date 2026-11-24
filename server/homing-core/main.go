@@ -442,11 +442,54 @@ func cleanupOwnedRules() {
 	}
 }
 
+// sysctlWarned 避免每 10 秒 reconcile 都重复打印同一条权限提示。
+var (
+	sysctlWarnMu sync.Mutex
+	sysctlWarned = map[string]bool{}
+)
+
+func sysctlKey(path string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(path, "/proc/sys/"), "/", ".")
+}
+
+// ensureSysctl 在值不符时尝试写入；没有权限就提示一次，交给宿主机 sysctl 负责。
+// 单容器/多容器两种部署都适用：
+//   - core 有权限（root/privileged/root init）：自动写入；
+//   - core 没有权限（非 root 且未给 DAC_OVERRIDE）：只提示，不阻塞启动。
+func ensureSysctl(path, value string) {
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == value {
+		return
+	}
+	if err := os.WriteFile(path, []byte(value), 0o644); err == nil {
+		sysctlWarnMu.Lock()
+		delete(sysctlWarned, path)
+		sysctlWarnMu.Unlock()
+		return
+	} else {
+		sysctlWarnMu.Lock()
+		already := sysctlWarned[path]
+		sysctlWarned[path] = true
+		sysctlWarnMu.Unlock()
+		if already {
+			return
+		}
+		key := sysctlKey(path)
+		switch {
+		case os.IsNotExist(err):
+			log.Printf("sysctl %s 不存在（宿主机可能未启用 IPv6）", key)
+		case os.IsPermission(err):
+			log.Printf("无法写入 %s=%s（权限不足）；如果宿主机已预置该值可忽略，否则请在宿主机执行: sysctl -w %s=%s，或让 core 以 root/privileged 运行", path, value, key, value)
+		default:
+			log.Printf("设置 %s=%s 失败: %v（宿主机已预置时可忽略）", path, value, err)
+		}
+	}
+}
+
 func ensureNAT() {
 	out := detectOutIface()
-	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0o644)
-	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), 0o644)
-	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/src_valid_mark", []byte("1"), 0o644)
+	ensureSysctl("/proc/sys/net/ipv4/ip_forward", "1")
+	ensureSysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1")
+	ensureSysctl("/proc/sys/net/ipv4/conf/all/src_valid_mark", "1")
 
 	port := strconv.Itoa(data.ListenPort)
 	ensureIPT("iptables", "nat", "POSTROUTING", []string{

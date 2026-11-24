@@ -141,6 +141,26 @@ docker compose up -d                 # 本地源码构建用：docker compose up
 - 仅内网：`TCP 51822`（管理台）、`TCP 18081`（自检页，可选）；
 - 不要暴露：`51821` / `51831`（只监听本机）。
 
+### 宿主机 sysctl（可选）
+
+core 启动时会检查并尽量自动写入 IPv4/IPv6 转发开关：
+
+```text
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+```
+
+如果 core 没有权限写 `/proc/sys`（例如容器以非 root 运行且没有 `DAC_OVERRIDE`），它不会阻止启动，只会在日志里打印一次提示。此时推荐在宿主机持久化：
+
+```ini
+# /etc/sysctl.d/99-homing.conf
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+# 可选、兼容旧版 fwmark 方案：net.ipv4.conf.all.src_valid_mark=1
+```
+
+宿主机已经预置后，core 不会重复写入，也不再需要为了 sysctl 给 core 额外权限；两种方式可以同时保留。
+
 ### 单容器模式（可选）
 
 适合 NAS / 只想在 Docker 里看到一个容器的场景：
