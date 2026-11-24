@@ -12,8 +12,12 @@
 #   cp .env.example .env     # 可选
 #   docker compose -f docker-compose.single.yml up -d --build
 #
-# 说明：单容器仍需要 privileged 来写宿主机 /proc/sys 和 iptables；
-# core 的权限收紧是下一步工作。管理台/打洞进程会通过 capsh 清空 capabilities。
+# 说明：单容器不再需要 privileged。
+# - core/plumber/proxy 需要 host 网络管理权限：NET_ADMIN；
+# - 初始化脚本需要把 /data 归 root 并修正权限：CHOWN；
+# - systempaths=unconfined 只用于让 core 能写宿主机 /proc/sys（Docker 默认把 /proc/sys 挂成只读）；
+# - /dev/net/tun 只给 remote 出口的 mihomo 用。
+# admin/stun 启动时用 capsh 清空 capabilities；core 启动时只保留 NET_ADMIN。
 
 services:
   homing:
@@ -27,7 +31,16 @@ services:
     container_name: homing
     restart: unless-stopped
     network_mode: host
-    privileged: true
+    cap_drop: [ALL]
+    # CHOWN：初始化时把宿主机用户创建的 /data 归 root；
+    # SETPCAP：让 capsh 能安全地删除子进程的 capability bounding set；
+    # NET_ADMIN：core/plumber/proxy 需要的网络管理权限。
+    # core 启动时会再降到只剩 NET_ADMIN，admin/stun 会清空全部 capability。
+    cap_add: [NET_ADMIN, CHOWN, SETPCAP]
+    security_opt:
+      - systempaths=unconfined
+    devices:
+      - /dev/net/tun:/dev/net/tun
     command: ["all"]
     environment:
       HOMING_MODE: all

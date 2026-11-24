@@ -87,6 +87,7 @@ COPY docker/stun-runner.sh   /usr/local/bin/homing-stun-runner
 COPY docker/plumb-runner.sh  /usr/local/bin/homing-plumb-runner
 COPY docker/core-port.sh     /usr/local/bin/homing-core-port
 COPY docker/nocaps.sh        /usr/local/bin/homing-nocaps
+COPY docker/capdrop.sh       /usr/local/bin/homing-capdrop
 COPY docker/services         /etc/homing/services
 
 RUN chmod +x \
@@ -100,6 +101,7 @@ RUN chmod +x \
       /usr/local/bin/homing-plumb-runner \
       /usr/local/bin/homing-core-port \
       /usr/local/bin/homing-nocaps \
+      /usr/local/bin/homing-capdrop \
       /etc/homing/services/*/run
 
 # tini 作为所有模式的 PID 1：负责收尸和信号转发。

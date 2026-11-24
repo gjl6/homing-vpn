@@ -11,8 +11,9 @@
 #   - 不再需要 ports 映射，core 直接监听宿主机 UDP 端口；
 #   - STUN 的 target 127.0.0.1:CORE_PORT 就是 core 本身；
 #   - 出口能看到真实客户端源地址（10.8.0.x），可按客户端开关分流。
-# 代价：core 需要 privileged 来写宿主机 /proc/sys（host 网络下 Docker 不允许
-# 通过 sysctls 设置 net.*），iptables 规则也直接写在宿主机命名空间。
+# 代价：core 需要 NET_ADMIN 来写宿主机 /proc/sys（host 网络下 Docker 不允许
+# 通过 sysctls 设置 net.*）和 iptables；容器本身不再 privileged，
+# 初始化后用 capsh 把 core 的 capability 降到只剩 NET_ADMIN。
 #
 # 数据目录统一为 ./data（可用 HOMING_DATA_DIR 覆盖）；所有状态文件都在里面。
 # 配置见 .env（全部可选，从 .env.example 复制即可）：
@@ -36,9 +37,14 @@ services:
     container_name: homing-core
     restart: unless-stopped
     network_mode: host
-    # host 网络下需要写宿主机 /proc/sys/net/*（ip_forward 等），Docker 的
-    # sysctls 不允许与 host 网络混用，因此这里给 privileged。
-    privileged: true
+    # host 网络下需要写宿主机 /proc/sys/net/*（ip_forward 等）。Docker 的
+    # sysctls 不允许与 host 网络混用，所以用 systempaths=unconfined 放开 /proc/sys，
+    # 再只给 core 需要的 NET_ADMIN；CHOWN/SETPCAP 仅用于初始化时修正 /data
+    # 属主并在启动 core 前把 capability 降到 NET_ADMIN。
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, CHOWN, SETPCAP]
+    security_opt:
+      - systempaths=unconfined
     command:
       - "core"
       - "-api"

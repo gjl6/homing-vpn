@@ -1,8 +1,9 @@
 #!/bin/sh
-# core：隧道核心，需要 privileged 容器里的 capabilities。
+# core：隧道核心。容器不再是 privileged，core 只保留 NET_ADMIN：
+# CHOWN/SETPCAP 只用于初始化/切换权限，exec 前丢掉。
 set -eu
 DATA="${DATA_DIR:-/data}"
-exec /usr/local/bin/homing-core \
+exec /usr/local/bin/homing-capdrop cap_chown,cap_setpcap /usr/local/bin/homing-core \
   -api "${CORE_API_ADDR:-127.0.0.1:51821}" \
   -data "$DATA/core.json" \
   -iface "${CORE_IFACE:-homing0}" \

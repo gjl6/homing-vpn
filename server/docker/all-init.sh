@@ -14,10 +14,12 @@ export HOMING_MODE=all
 
 log() { printf '[homing-init] %s\n' "$*"; }
 
-mkdir -p "$DATA" "$DATA/stun" "$DATA/proxy"
-# 单容器里 admin/stun 以 “root + 清空 capabilities” 运行，不能靠 CAP_DAC_OVERRIDE
-# 绕过目录权限；把 /data 归 root，避免 NAS 上数据目录属主是普通用户时写不进去。
+mkdir -p "$DATA"
+# 数据目录可能是宿主机普通用户创建的（NAS 常见），先归 root 再建子目录：
+# 容器已经没有 DAC_OVERRIDE，普通目录上直接 mkdir 会失败。
 chown -R 0:0 "$DATA" 2>/dev/null || true
+chmod -R u+rwX "$DATA" 2>/dev/null || true
+mkdir -p "$DATA/stun" "$DATA/proxy"
 # Docker 的 /dev 是 tmpfs，镜像里的设备节点会被覆盖；单容器里由 init 补一次。
 mkdir -p /dev/net 2>/dev/null || true
 [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
