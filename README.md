@@ -371,6 +371,38 @@ sudo dpkg -i dist/homing-client_2.1.0_amd64.deb
 
 远程代理模式保存后，可以点「出口」页的 **测试出口**：管理台会经远端代理请求一次 `https://www.baidu.com/`，直接给出代理是否连通、耗时和 HTTP 状态，不用先拿客户端试。
 
+### 本机 TUN 模式：宿主机 mihomo 的要求
+
+「本机 TUN」模式要求 mihomo 在宿主机网络命名空间里创建 TUN，Homing 只负责把选中的客户端流量策略路由进去。用 Docker 跑 mihomo 时：
+
+- `network_mode: host`：否则 TUN 建在容器 netns 里，宿主机和 Homing 都看不到；
+- 建 TUN 的权限：`privileged: true`，或最小化 `cap_add: [NET_ADMIN]` + `devices: ["/dev/net/tun:/dev/net/tun"]`；
+- 宿主机已加载 `tun` 模块（`ls /dev/net/tun` 存在）；
+- mihomo 配置里 `tun.enable: true`，`tun.device` 与管理台「TUN 设备」填的一致（默认 `mihomo-gw`）；
+- **必须**关掉 mihomo 自己的路由接管：`tun.auto-route: false`、`tun.auto-redirect: false`、`tun.auto-detect-interface: false`，否则会和 Homing 的 `ip rule` / table 100 抢路由；
+- 保留 TUN 默认的 IPv4 地址（如 `198.18.0.1/30`）。Homing 会把客户端流量 SNAT 到「TUN 地址 +1」（如 `198.18.0.2`）再送进 TUN，不要设成 `/32`，也不要用地址 +1 不可用的网段；
+- 规则最后要有 `MATCH` 兜底走代理，否则进 TUN 的流量会被 mihomo 直连。
+
+mihomo 配置关键片段：
+
+```yaml
+tun:
+  enable: true
+  device: mihomo-gw
+  stack: system        # 不支持 system 时可用 gvisor
+  mtu: 1500
+  auto-route: false
+  auto-redirect: false
+  auto-detect-interface: false
+
+rules:
+  - MATCH,PROXY
+```
+
+启动顺序：先起 mihomo，确认 `ip link show mihomo-gw` 能看到接口；再在「出口」页选「本机 TUN」、填同样的设备名后保存；状态变成「TUN 已就绪」后，到「客户端」页给设备打开「代理出口」。
+
+> 如果 mihomo 已经开了 `mixed-port: 7890`，更省事的是直接用「远程代理」模式填 `127.0.0.1:7890`（HTTP / SOCKS5 都支持）：不需要 TUN，也不需要给 mihomo 开 `privileged`。mihomo 用 bridge 网络时，把地址换成宿主机 `docker0` 的网关 IP 即可。
+
 行为约定：
 
 - 管理台切换后约 10 秒生效，不需要重连客户端；
