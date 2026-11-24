@@ -92,7 +92,9 @@ server/
 client-android/     Android 客户端（Kotlin）
 client-uos/         UOS / Linux 桌面客户端（Python Gtk3 + Go helper）
 scripts/            镜像构建 / 发布脚本
-docker-compose.yml  服务端编排
+docker-compose.yml  服务端编排（多容器）
+docker-compose.single.yml  单容器模式（源码构建）
+docker-compose.hub.yml     单容器模式（直接拉 Docker Hub 镜像）
 ```
 
 ## 快速开始
