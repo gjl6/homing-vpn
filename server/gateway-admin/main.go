@@ -10,11 +10,13 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"embed"
 	"encoding/base32"
 	"encoding/binary"
@@ -25,6 +27,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -3114,6 +3117,258 @@ func handleEgress(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// egressTestURL 用于验证远端代理是否真的能出网。
+// 选百度而不是 gstatic：百度从国内和海外都可达，远端代理无论在哪都能验证。
+const (
+	egressTestURL     = "https://www.baidu.com/"
+	egressTestTimeout = 10 * time.Second
+)
+
+type egressTestResult struct {
+	OK           bool   `json:"ok"`
+	Mode         string `json:"mode"`
+	Proxy        string `json:"proxy,omitempty"`
+	Target       string `json:"target,omitempty"`
+	LatencyMs    int64  `json:"latencyMs,omitempty"`
+	StatusCode   int    `json:"statusCode,omitempty"`
+	TunReady     bool   `json:"tunReady"`
+	ProxyRunning bool   `json:"proxyRunning"`
+	Message      string `json:"message,omitempty"`
+}
+
+func proxyAddr(cfg egressConfig) string {
+	return net.JoinHostPort(cfg.ProxyHost, strconv.Itoa(cfg.ProxyPort))
+}
+
+func proxyURLText(cfg egressConfig) string {
+	return cfg.ProxyType + "://" + proxyAddr(cfg)
+}
+
+// socks5DialContext 返回一个经 SOCKS5 代理建连的 DialContext，供 http.Transport 复用。
+func socks5DialContext(proxyAddr, username, password string, timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := &net.Dialer{Timeout: timeout}
+		conn, err := d.DialContext(ctx, "tcp", proxyAddr)
+		if err != nil {
+			return nil, fmt.Errorf("连接 SOCKS5 代理 %s 失败: %w", proxyAddr, err)
+		}
+		if err := socks5Handshake(conn, username, password, addr, timeout); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return conn, nil
+	}
+}
+
+func socks5Handshake(conn net.Conn, username, password, target string, timeout time.Duration) error {
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+
+	methods := []byte{0x00}
+	if username != "" {
+		methods = append(methods, 0x02)
+	}
+	greet := append([]byte{0x05, byte(len(methods))}, methods...)
+	if _, err := conn.Write(greet); err != nil {
+		return fmt.Errorf("SOCKS5 握手失败: %w", err)
+	}
+	method := make([]byte, 2)
+	if _, err := io.ReadFull(conn, method); err != nil {
+		return fmt.Errorf("SOCKS5 握手读取失败: %w", err)
+	}
+	if method[0] != 0x05 {
+		return fmt.Errorf("对端不是 SOCKS5 代理（版本 %d）", method[0])
+	}
+	switch method[1] {
+	case 0x00:
+	case 0x02:
+		if username == "" {
+			return fmt.Errorf("SOCKS5 代理要求用户名密码")
+		}
+		u, p := []byte(username), []byte(password)
+		if len(u) > 255 || len(p) > 255 {
+			return fmt.Errorf("SOCKS5 用户名或密码过长")
+		}
+		auth := []byte{0x01, byte(len(u))}
+		auth = append(auth, u...)
+		auth = append(auth, byte(len(p)))
+		auth = append(auth, p...)
+		if _, err := conn.Write(auth); err != nil {
+			return fmt.Errorf("SOCKS5 认证发送失败: %w", err)
+		}
+		ar := make([]byte, 2)
+		if _, err := io.ReadFull(conn, ar); err != nil {
+			return fmt.Errorf("SOCKS5 认证读取失败: %w", err)
+		}
+		if ar[1] != 0x00 {
+			return fmt.Errorf("SOCKS5 用户名或密码错误")
+		}
+	default:
+		return fmt.Errorf("SOCKS5 代理不支持所选认证方式（%d）", method[1])
+	}
+
+	host, portText, err := net.SplitHostPort(target)
+	if err != nil {
+		return fmt.Errorf("测试地址无效: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("测试端口无效: %q", portText)
+	}
+	req := []byte{0x05, 0x01, 0x00}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			req = append(req, 0x01)
+			req = append(req, ip4...)
+		} else {
+			req = append(req, 0x04)
+			req = append(req, ip.To16()...)
+		}
+	} else {
+		if len(host) > 255 {
+			return fmt.Errorf("测试域名过长")
+		}
+		req = append(req, 0x03, byte(len(host)))
+		req = append(req, host...)
+	}
+	req = append(req, byte(port>>8), byte(port))
+	if _, err := conn.Write(req); err != nil {
+		return fmt.Errorf("SOCKS5 CONNECT 发送失败: %w", err)
+	}
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(conn, head); err != nil {
+		return fmt.Errorf("SOCKS5 CONNECT 读取失败: %w", err)
+	}
+	if head[0] != 0x05 {
+		return fmt.Errorf("SOCKS5 CONNECT 响应版本异常（%d）", head[0])
+	}
+	if head[1] != 0x00 {
+		return fmt.Errorf("SOCKS5 代理拒绝连接（错误码 %d）", head[1])
+	}
+	skip := 0
+	switch head[3] {
+	case 0x01:
+		skip = 4
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(conn, l); err != nil {
+			return fmt.Errorf("SOCKS5 CONNECT 读取失败: %w", err)
+		}
+		skip = int(l[0])
+	case 0x04:
+		skip = 16
+	default:
+		return fmt.Errorf("SOCKS5 CONNECT 响应地址类型异常（%d）", head[3])
+	}
+	if _, err := io.ReadFull(conn, make([]byte, skip+2)); err != nil {
+		return fmt.Errorf("SOCKS5 CONNECT 读取失败: %w", err)
+	}
+	return nil
+}
+
+// testRemoteEgress 经远端代理请求测试地址，返回耗时、HTTP 状态码和错误。
+func testRemoteEgress(cfg egressConfig) (int64, int, error) {
+	timeout := egressTestTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: timeout}).DialContext,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		DisableKeepAlives:     true,
+	}
+	if cfg.ProxyType == "socks5" {
+		tr.DialContext = socks5DialContext(proxyAddr(cfg), cfg.ProxyUsername, cfg.ProxyPassword, timeout)
+	} else {
+		u := &url.URL{Scheme: "http", Host: proxyAddr(cfg)}
+		if cfg.ProxyUsername != "" {
+			u.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egressTestURL, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		return latency, 0, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	return latency, resp.StatusCode, nil
+}
+
+// handleEgressTest 测试「出口到没到代理」：remote 模式直接经远端代理请求测试地址；
+// tun 模式由宿主机提供 TUN，无法从管理台发起客户端流量，只回报 TUN 状态。
+func handleEgressTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	cfg := loadEgressConfig()
+	res := egressTestResult{Mode: cfg.Mode, TunReady: egressTunReady(cfg.Tun)}
+	if cfg.Mode == "remote" {
+		res.Proxy = proxyURLText(cfg)
+		res.ProxyRunning = readProxyStatus().Running
+	}
+	if !cfg.Enabled {
+		res.Message = "出口未启用：先打开「启用出口」并保存，再测试"
+		writeJSON(w, 200, res)
+		return
+	}
+	if cfg.Mode != "remote" {
+		if res.TunReady {
+			res.Message = "本机 TUN「" + cfg.Tun + "」已存在；该模式只对客户端源地址生效，实际连通性请在客户端访问外网验证"
+		} else {
+			res.Message = "本机 TUN「" + cfg.Tun + "」未发现：先在宿主机启动带 TUN 的 mihomo，或改用远程代理模式"
+		}
+		writeJSON(w, 200, res)
+		return
+	}
+	if cfg.ProxyHost == "" || cfg.ProxyPort <= 0 {
+		res.Message = "远端代理地址或端口未填写完整"
+		writeJSON(w, 200, res)
+		return
+	}
+	res.Target = egressTestURL
+	latency, status, err := testRemoteEgress(cfg)
+	res.LatencyMs = latency
+	res.StatusCode = status
+	if err != nil {
+		res.Message = "代理测试失败：" + err.Error()
+		log.Printf("egress test failed: proxy=%s target=%s err=%v", res.Proxy, egressTestURL, err)
+		writeJSON(w, 200, res)
+		return
+	}
+	if status < 200 || status >= 400 {
+		res.Message = fmt.Sprintf("代理可达，但测试地址返回 HTTP %d（远端出口网络异常）", status)
+		writeJSON(w, 200, res)
+		return
+	}
+	res.OK = true
+	res.Message = "代理连通"
+	if !res.ProxyRunning {
+		res.Message = "代理连通，但本机 mihomo 未运行，客户端流量进不了出口"
+	}
+	if !res.TunReady {
+		res.Message = "代理连通，但 TUN「" + cfg.Tun + "」未就绪，客户端流量暂时进不了出口"
+	}
+	log.Printf("egress test ok: proxy=%s latency=%dms status=%d", res.Proxy, latency, status)
+	writeJSON(w, 200, res)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	// 自研 homing-core 不需要管理员密码（只监听 127.0.0.1，由管理台独占访问）
@@ -3162,6 +3417,7 @@ func main() {
 	mux.HandleFunc("/api/connect-settings", requireAuth(handleConnectSettings))
 	mux.HandleFunc("/api/connect-settings/detect", requireAuth(handleDetectAddresses))
 	mux.HandleFunc("/api/egress", requireAuth(handleEgress))
+	mux.HandleFunc("/api/egress/test", requireAuth(handleEgressTest))
 	mux.HandleFunc("/api/network/port", requireAuth(handleSetPort))
 	mux.HandleFunc("/api/stun-config", func(w http.ResponseWriter, r *http.Request) {
 		if !authOK(r) {

@@ -763,8 +763,10 @@ details.more .more-body{margin-top:7px;font-size:11.5px;line-height:1.7;color:va
               </div>
               <div class="row" style="gap:8px;margin-bottom:8px">
                 <button class="btn primary" onclick="saveEgress()"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z"/></svg>保存并应用</button>
+                <button class="btn" onclick="testEgress()" id="egress-test-btn" title="经远端代理请求一个测试地址，验证出口是否真的到得了代理">测试出口</button>
                 <button class="btn" onclick="stopEgress()">停止出口</button>
                 <span class="badge neutral hidden" id="egress-state"></span>
+                <span class="badge neutral hidden" id="egress-test-state"></span>
               </div>
               <details class="more">
                 <summary>说明</summary>
@@ -1492,6 +1494,7 @@ async function saveConnect() {
 /* ---------- 出口（mihomo） ---------- */
 async function loadEgress() {
   try {
+    if ($('egress-test-state')) { $('egress-test-state').classList.add('hidden'); $('egress-test-state').textContent = ''; }
     const r = await api('/api/egress');
     const c = r.config || {};
     S.egressMode = c.mode === 'remote' ? 'remote' : 'tun';
@@ -1614,6 +1617,35 @@ async function stopEgress() {
   if ($('egress-enabled')) $('egress-enabled').checked = false;
   renderEgressFields();
   await saveEgress();
+}
+
+async function testEgress() {
+  const btn = $('egress-test-btn');
+  const state = $('egress-test-state');
+  const set = (t, k) => {
+    if (!state) return;
+    state.textContent = t;
+    state.className = 'badge ' + (k || 'neutral');
+    state.classList.toggle('hidden', !t);
+  };
+  if (btn) btn.disabled = true;
+  set('正在测试…', 'warn');
+  try {
+    const r = await api('/api/egress/test', {method: 'POST'});
+    if (r.ok) {
+      const ms = (r.latencyMs != null) ? (' · ' + r.latencyMs + ' ms') : '';
+      set('代理连通' + ms, 'ok');
+      toast('出口正常：代理连通' + ms + (r.message && r.message !== '代理连通' ? ' · ' + r.message : ''), 'ok');
+    } else {
+      set('测试失败', 'bad');
+      toast('出口测试失败：' + (r.message || '未知错误'), 'err');
+    }
+  } catch (e) {
+    set('测试失败', 'bad');
+    toast('出口测试失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function savePort() {
