@@ -104,14 +104,66 @@ docker-compose.yml  服务端编排
 - 一个外网可达的 UDP 端口（有公网 IP 时做端口映射；没有公网 IP 时用内置打洞）；
 - root 或 docker 权限。
 
-### 部署
+### 方式一：直接用 Docker Hub 镜像（不克隆仓库）
+
+镜像：`gjl168168/homing:1.2.5`，`latest` 同版本。
+
+#### docker run（单容器）
+
+```bash
+docker run -d --name homing --restart unless-stopped \
+  --network host \
+  --cap-drop ALL \
+  --cap-add NET_ADMIN --cap-add DAC_OVERRIDE --cap-add MKNOD \
+  --security-opt systempaths=unconfined \
+  --device /dev/net/tun:/dev/net/tun \
+  -v /opt/homing/data:/data \
+  -v /lib/modules:/lib/modules:ro \
+  -e TZ=Asia/Shanghai \
+  -e ADMIN_PASSWORD='改成你的登录密码' \
+  gjl168168/homing:1.2.5 all
+```
+
+#### docker compose（单容器，推荐）
+
+```bash
+mkdir -p /opt/homing && cd /opt/homing
+curl -fsSLO https://raw.githubusercontent.com/gjl6/homing-vpn/main/docker-compose.hub.yml
+HOMING_DATA_DIR=/opt/homing/data ADMIN_PASSWORD='改成你的登录密码' \
+  docker compose -f docker-compose.hub.yml up -d
+```
+
+升级：
+
+```bash
+docker pull gjl168168/homing:1.2.5
+docker compose -f docker-compose.hub.yml up -d --force-recreate
+```
+
+#### docker compose（多容器）
+
+需要管理台在线改隧道端口、启停出口容器时用多容器模式：
+
+```bash
+git clone https://github.com/gjl6/homing-vpn.git /opt/homing
+cd /opt/homing
+cp .env.example .env
+# .env 里设置：HOMING_IMAGE_PREFIX=gjl168168/   HOMING_VERSION=1.2.5
+docker compose pull
+docker compose up -d --no-build
+```
+
+> 多容器模式的管理台会挂载 `docker.sock` 和部署目录，用来自动重建 core / 出口容器；单容器模式不挂，权限面更小。
+
+### 方式二：从源码构建
 
 ```bash
 git clone https://github.com/gjl6/homing-vpn.git /opt/homing
 cd /opt/homing
 cp .env.example .env                 # 全部可选，可以不改
-vi .env                              # 用 Docker Hub 镜像时设置 HOMING_IMAGE_PREFIX=gjl168168/
-docker compose up -d                 # 本地源码构建用：docker compose up -d --build
+docker compose up -d --build         # 多容器
+# 只要一个容器：
+docker compose -f docker-compose.single.yml up -d --build
 ```
 
 `.env` 全部是可选项；不填时自动使用以下默认值：
@@ -122,7 +174,7 @@ docker compose up -d                 # 本地源码构建用：docker compose up
 - 打洞端口默认随机（可在管理台随时更换）。
 
 > 多容器模式的管理台需要挂载 `docker.sock` 和部署目录来在线重建容器；部署路径会通过 compose 标签自动探测，不再需要手工设置 `VPN_HOST_DIR`。
-> 如果只想部署一个容器，用下面的「单容器模式」，它不挂 `docker.sock`。
+> 只想部署一个容器时，用上面的 `docker-compose.hub.yml`（或源码版 `docker-compose.single.yml`），它不挂 `docker.sock`。
 > 数据目录统一为 `./data`，可用 `HOMING_DATA_DIR` 覆盖。
 > 构建时会额外拉取一个代理内核基础镜像（仅用于可选的远程代理出口），离线环境可先 `docker pull`；访问不了 `proxy.golang.org` 时在 `.env` 加 `GO_PROXY=https://goproxy.cn,direct`。
 
@@ -132,7 +184,8 @@ docker compose up -d                 # 本地源码构建用：docker compose up
 2. 立刻修改密码并开启 TOTP；
 3. 「设置 → 网络与默认值」里确认/修改 DNS、局域网网段、打洞端口；
 4. 在「客户端」里新建设备，扫码或下载配置；
-5. 路由器 / 云安全组放行 **UDP `${CORE_PORT}`**（默认 51820），**不要**把 51822 映射到公网。
+5. 路由器 / 云安全组放行 **UDP `${CORE_PORT}`**（默认 51820），**不要**把 51822 映射到公网；
+6. 健康检查：`curl -s http://127.0.0.1:51822/healthz`（管理台）、`curl -s http://127.0.0.1:51831/healthz`（打洞）。
 
 ### 防火墙
 

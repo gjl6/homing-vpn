@@ -1,0 +1,46 @@
+# 归途（Homing）单容器模式：直接使用 Docker Hub 镜像，无需克隆仓库。
+#
+# 用法：
+#   curl -fsSLO https://raw.githubusercontent.com/gjl6/homing-vpn/main/docker-compose.hub.yml
+#   HOMING_DATA_DIR=/opt/homing/data ADMIN_PASSWORD='改成你的密码' \
+#     docker compose -f docker-compose.hub.yml up -d
+#
+# 打开 http://<宿主机局域网 IP>:51822 ，首次登录 admin / admin123（登录后立即改密码）。
+services:
+  homing:
+    image: ${HOMING_IMAGE:-gjl168168/homing:1.2.5}
+    container_name: homing
+    restart: unless-stopped
+    network_mode: host
+    # 单容器只保留三个能力：
+    #   NET_ADMIN   写接口 / iptables / 策略路由
+    #   DAC_OVERRIDE 读写任意属主的 /data（不需要提前 chown）
+    #   MKNOD       没有“设备”栏时自动创建 /dev/net/tun（远程代理出口要用）
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, DAC_OVERRIDE, MKNOD]
+    security_opt:
+      - systempaths=unconfined
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["all"]
+    environment:
+      DATA_DIR: /data
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      ADMIN_LISTEN: "${ADMIN_LISTEN:-:51822}"
+      CORE_PORT: "${CORE_PORT:-51820}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ${HOMING_DATA_DIR:-./data}:/data
+      - /lib/modules:/lib/modules:ro
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/homing-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
