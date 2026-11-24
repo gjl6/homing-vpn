@@ -1542,6 +1542,13 @@ function renderEgressFields() {
   document.querySelectorAll('#egress-mode-seg button').forEach(el => el.classList.toggle('on', el.dataset.mode === mode));
   const rf = $('egress-remote-fields');
   if (rf) rf.classList.toggle('hidden', mode !== 'remote');
+  const tb = $('egress-test-btn');
+  if (tb) {
+    tb.textContent = mode === 'remote' ? '测试出口' : '检查 TUN';
+    tb.title = mode === 'remote'
+      ? '经远端代理请求一个测试地址，验证出口是否真的到得了代理'
+      : '本机 TUN 模式无法从管理台自测，这里只检查 TUN 是否存在';
+  }
 }
 
 function renderEgressStatus(st) {
@@ -1636,6 +1643,9 @@ async function testEgress() {
       const ms = (r.latencyMs != null) ? (' · ' + r.latencyMs + ' ms') : '';
       set('代理连通' + ms, 'ok');
       toast('出口正常：代理连通' + ms + (r.message && r.message !== '代理连通' ? ' · ' + r.message : ''), 'ok');
+    } else if (r.mode !== 'remote') {
+      set('无法自测', 'neutral');
+      toast(r.message || '本机 TUN 模式无法从管理台自测', '');
     } else {
       set('测试失败', 'bad');
       toast('出口测试失败：' + (r.message || '未知错误'), 'err');

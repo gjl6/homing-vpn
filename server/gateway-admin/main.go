@@ -3330,9 +3330,9 @@ func handleEgressTest(w http.ResponseWriter, r *http.Request) {
 	}
 	if cfg.Mode != "remote" {
 		if res.TunReady {
-			res.Message = "本机 TUN「" + cfg.Tun + "」已存在；该模式只对客户端源地址生效，实际连通性请在客户端访问外网验证"
+			res.Message = "本机 TUN「" + cfg.Tun + "」已存在；该模式只对客户端源地址生效，管理台无法自测，想实测请改用「远程代理」模式"
 		} else {
-			res.Message = "本机 TUN「" + cfg.Tun + "」未发现：先在宿主机启动带 TUN 的 mihomo，或改用远程代理模式"
+			res.Message = "本机 TUN「" + cfg.Tun + "」未发现：先在宿主机启动带 TUN 的 mihomo，或改用「远程代理」模式"
 		}
 		writeJSON(w, 200, res)
 		return

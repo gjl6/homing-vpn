@@ -191,7 +191,7 @@ docker compose -f docker-compose.single.yml up -d --build
 
 | 位置 | 填什么 |
 | --- | --- |
-| 镜像 | `gjl168168/homing:1.2.4`（或导入离线 tar 包） |
+| 镜像 | `gjl168168/homing:1.2.5`（或导入离线 tar 包） |
 | 命令 / CMD | `all`；1.2.2 起也可以留空，镜像默认就是 `all` |
 | 网络 | `host`（使用与宿主机相同的网络） |
 | 端口设置 | 会自动显示 `51822/tcp`（管理台）、`18081/tcp`（公网自检页）、`51820/udp`（隧道）；host 网络下不需要再做映射，能看到即可 |
