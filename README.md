@@ -185,6 +185,27 @@ mkdir -p data
 docker compose -f docker-compose.single.yml up -d --build
 ```
 
+#### 用 NAS 的 Docker 图形界面（群晖 / 绿联 / QNAP 等）
+
+镜像里已经声明了端口和数据卷，图形界面里按下面填即可：
+
+| 位置 | 填什么 |
+| --- | --- |
+| 镜像 | `gjl168168/homing:1.2.1`（或导入离线 tar 包） |
+| 命令 / CMD | `all`（必须，选择单容器模式） |
+| 网络 | `host`（使用与宿主机相同的网络） |
+| 端口设置 | 会自动显示 `51822/tcp`（管理台）、`18081/tcp`（公网自检页）、`51820/udp`（隧道）；host 网络下不需要再做映射，能看到即可 |
+| 存储空间 | 容器路径 `/data`，宿主机任选一个目录（NAS 共享文件夹也可以）；不需要 chown |
+| 功能 / 能力（Capabilities） | 添加 `NET_ADMIN` 和 `DAC_OVERRIDE`；界面支持“丢弃全部能力”时先丢弃再添加这两项 |
+| 设备（可选） | `/dev/net/tun`，只在启用“远程代理出口”时需要 |
+| 安全选项（可选） | `systempaths=unconfined`，用于让容器自动写 sysctl；界面没有这项就在宿主机预置 `net.ipv4.ip_forward=1` / `net.ipv6.conf.all.forwarding=1` |
+| 环境变量 | 建议加 `ADMIN_PASSWORD=<登录密码>`；`TZ=Asia/Shanghai`；其余可留空 |
+| 重启策略 | `unless-stopped` |
+
+启动后浏览器打开 `http://<NAS 局域网 IP>:51822`，用 `admin / admin123` 登录并立即改密码。
+
+> 图形界面里找不到“设备 / 安全选项”输入框也可以先不加：隧道和打洞不受影响，只有“远程代理出口”需要 `/dev/net/tun`，自动写 sysctl 需要 `systempaths=unconfined`（可用宿主机 sysctl 代替）。
+
 日常运维命令：
 
 ```bash

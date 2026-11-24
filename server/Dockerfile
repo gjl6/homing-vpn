@@ -100,6 +100,12 @@ RUN chmod +x \
       /usr/local/bin/homing-core-port \
       /etc/homing/services/*/run
 
+# 图形界面（NAS / Portainer 等）会读取下面两段声明：
+# - EXPOSE 让“端口设置”里直接显示管理台 / 自检页 / 隧道端口（host 网络下无需再做映射）；
+# - VOLUME 让“存储空间”里直接出现 /data，用户只要选择宿主机上的目录即可。
+EXPOSE 51820/udp 51822/tcp 18081/tcp
+VOLUME ["/data"]
+
 # tini 作为所有模式的 PID 1：负责收尸和信号转发。
 # all 模式下 homing-init 再用 runit 监督子进程；分容器模式行为不变。
 ENTRYPOINT ["/sbin/tini", "-g", "--", "/usr/local/bin/homing"]
