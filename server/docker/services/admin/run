@@ -1,0 +1,7 @@
+#!/bin/sh
+# admin：管理台。等 core 就绪后启动；清空 capability（单容器是 privileged）。
+set -eu
+until wget -q -O /dev/null "http://127.0.0.1:${CORE_API_PORT:-51821}/healthz" 2>/dev/null; do
+  sleep 1
+done
+exec /usr/local/bin/homing-nocaps /usr/local/bin/gateway-admin

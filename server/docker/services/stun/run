@@ -1,0 +1,5 @@
+#!/bin/sh
+# stun：等 core 就绪后启动，并在打洞端口/隧道端口变化时自动重启。
+# 打洞不需要任何 capability；单容器是 privileged，这里显式清空。
+set -eu
+exec /usr/local/bin/homing-nocaps /usr/local/bin/homing-stun-runner

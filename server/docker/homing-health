@@ -1,0 +1,15 @@
+#!/bin/sh
+# 单容器模式的 Docker healthcheck：core 和 admin 都必须活着。
+# stun / plumb / proxy 由 runit 自己重启，暂时失败不把整个容器判死。
+set -eu
+
+CORE_PORT="${CORE_API_PORT:-51821}"
+wget -q -O /dev/null "http://127.0.0.1:${CORE_PORT}/healthz" || exit 1
+
+ADMIN_ADDR="${ADMIN_LISTEN:-:51822}"
+ADMIN_PORT="${ADMIN_ADDR##*:}"
+case "$ADMIN_PORT" in
+  ''|*[!0-9]*) ADMIN_PORT=51822 ;;
+esac
+wget -q -O /dev/null "http://127.0.0.1:${ADMIN_PORT}/healthz" || exit 1
+exit 0

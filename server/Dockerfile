@@ -70,15 +70,38 @@ LABEL org.opencontainers.image.title="Homing" \
 
 RUN apk add --no-cache \
       iptables iproute2 \
-      ca-certificates tzdata
+      ca-certificates tzdata \
+      runit tini libcap
 
 COPY --from=build-core  /out/homing-core   /usr/local/bin/homing-core
 COPY --from=build-stun  /out/gateway-stun  /usr/local/bin/gateway-stun
 COPY --from=build-admin /out/gateway-admin /usr/local/bin/gateway-admin
 COPY --from=mihomo      /mihomo            /usr/local/bin/mihomo
 
-COPY docker/entrypoint.sh /usr/local/bin/homing
-COPY docker/plumber.sh /usr/local/bin/homing-plumber
-RUN chmod +x /usr/local/bin/homing /usr/local/bin/homing-plumber /usr/local/bin/mihomo
+COPY docker/entrypoint.sh    /usr/local/bin/homing
+COPY docker/plumber.sh       /usr/local/bin/homing-plumber
+COPY docker/all-init.sh      /usr/local/bin/homing-init
+COPY docker/homing-health    /usr/local/bin/homing-health
+COPY docker/proxy-runner.sh  /usr/local/bin/homing-proxy-runner
+COPY docker/stun-runner.sh   /usr/local/bin/homing-stun-runner
+COPY docker/plumb-runner.sh  /usr/local/bin/homing-plumb-runner
+COPY docker/core-port.sh     /usr/local/bin/homing-core-port
+COPY docker/nocaps.sh        /usr/local/bin/homing-nocaps
+COPY docker/services         /etc/homing/services
 
-ENTRYPOINT ["/usr/local/bin/homing"]
+RUN chmod +x \
+      /usr/local/bin/homing \
+      /usr/local/bin/homing-plumber \
+      /usr/local/bin/mihomo \
+      /usr/local/bin/homing-init \
+      /usr/local/bin/homing-health \
+      /usr/local/bin/homing-proxy-runner \
+      /usr/local/bin/homing-stun-runner \
+      /usr/local/bin/homing-plumb-runner \
+      /usr/local/bin/homing-core-port \
+      /usr/local/bin/homing-nocaps \
+      /etc/homing/services/*/run
+
+# tini 作为所有模式的 PID 1：负责收尸和信号转发。
+# all 模式下 homing-init 再用 runit 监督子进程；分容器模式行为不变。
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/usr/local/bin/homing"]

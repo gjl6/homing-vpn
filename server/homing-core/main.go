@@ -22,10 +22,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -1027,6 +1029,17 @@ func main() {
 		*iface, data.ListenPort, data.IPv4CIDR, data.AddressV4, strings.Join(data.DNS, ","), len(data.Clients), detectOutIface())
 
 	startProbeEcho()
+
+	// 正常退出（docker stop / sv restart）时清掉自己写的 iptables 规则，
+	// 避免宿主网络模式下残留 NAT/FORWARD 规则。
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		<-ch
+		log.Printf("收到退出信号，清理 homing-core iptables 规则")
+		cleanupOwnedRules()
+		os.Exit(0)
+	}()
 
 	if *reconcileEvery > 0 {
 		go func() {

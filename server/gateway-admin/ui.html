@@ -568,7 +568,7 @@ details.more .more-body{margin-top:7px;font-size:11.5px;line-height:1.7;color:va
             </div>
             <details class="more">
               <summary>说明</summary>
-              <div class="more-body">DNS / 局域网网段会用于新生成的客户端和出口规则；打洞端口保存后会重建 homing-stun，实际端口在上方「接口设置」和概览里显示。环境变量 CORE_DNS / CORE_LAN / CLIENT_NET / STUN_PORT 优先于这里。修改隧道客户端网段会让现有客户端地址重新编号，旧配置全部失效。</div>
+              <div class="more-body">DNS / 局域网网段会用于新生成的客户端和出口规则；打洞端口保存后打洞进程会自动重启，实际端口在上方「接口设置」和概览里显示。环境变量 CORE_DNS / CORE_LAN / CLIENT_NET / STUN_PORT 优先于这里。修改隧道客户端网段会让现有客户端地址重新编号，旧配置全部失效。</div>
             </details>
           </div>
         </div>
@@ -1036,6 +1036,7 @@ async function refresh(manual) {
 function render() {
   if (!S.data) return;
   const d = S.data, st = d.stun || {}, cur = st.current || null;
+  S.allInOne = d.mode === 'all';
   const clients = d.clients || [];
   const hist = st.mappingChanges || [];
   const online = clients.filter(c => c.latestHandshakeAt).length;
@@ -1618,8 +1619,12 @@ async function stopEgress() {
 async function savePort() {
   const port = parseInt($('if-newport').value, 10);
   if (!port || port < 1024 || port > 65535) { toast('端口范围 1024-65535', 'err'); return; }
-  if (!confirm('确认把隧道监听端口改为 ' + port + '？\n\n会重建 隧道核心 容器，所有客户端需要重新导出配置。')) return;
-  $('if-state').textContent = '正在重建容器…（约 5~10 秒）';
+  const single = !!S.allInOne;
+  const hint = single
+    ? '会热更新隧道核心端口，并自动重启打洞进程'
+    : '会重建 隧道核心 容器';
+  if (!confirm('确认把隧道监听端口改为 ' + port + '？\n\n' + hint + '，所有客户端需要重新导出配置。')) return;
+  $('if-state').textContent = single ? '正在应用…（约 2~5 秒）' : '正在重建容器…（约 5~10 秒）';
   try {
     const r = await api('/api/network/port', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({port})});
     $('if-state').textContent = '已切换到端口 ' + r.port + '（' + new Date().toLocaleTimeString() + '）';

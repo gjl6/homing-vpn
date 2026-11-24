@@ -47,6 +47,9 @@ var (
 	adminPass  = os.Getenv("ADMIN_PASSWORD")
 	coreUser   = getenv("CORE_ADMIN_USER", "")
 	corePass   = os.Getenv("CORE_ADMIN_PASSWORD")
+	// allInOne：单容器模式（docker-compose.single.yml）。此时管理台不再挂
+	// docker.sock，所有“启停/重建容器”的动作改为写文件 + 内置 runner 生效。
+	allInOne = os.Getenv("HOMING_MODE") == "all"
 	// vpnDir 是容器内可见的部署目录（compose 把仓库目录挂到 /vpn）；
 	// 宿主机上的真实路径由 detectVPNHostDir 通过 compose 标签自动探测。
 	vpnDir     = getenv("VPN_DIR", "/vpn")
@@ -68,6 +71,9 @@ var (
 	// 远程代理模式：管理台生成本机 mihomo 配置，homing-proxy 以 host 网络启动
 	proxyDir        = dataDir + "/proxy"
 	proxyConfigPath = proxyDir + "/config.yaml"
+	proxyStatusPath = proxyDir + "/status.json"
+	// 单容器模式：隧道监听端口由管理台写入，stun runner 读取后决定 -target
+	corePortPath = dataDir + "/core-port"
 )
 
 // systemSettings 是管理台维护的服务端默认值；环境变量仍然优先。
@@ -85,6 +91,10 @@ var (
 )
 
 func detectVPNHostDir() string {
+	// 单容器模式没有 compose 部署目录，也没有 docker.sock，直接跳过探测。
+	if allInOne {
+		return ""
+	}
 	// VPN_DIR 是容器内路径；宿主机路径优先用显式覆盖，其次从 compose 标签/挂载自动探测。
 	if v := strings.TrimSpace(os.Getenv("VPN_HOST_DIR")); v != "" {
 		return v
@@ -128,6 +138,9 @@ func composeArgs(args ...string) ([]string, string, []string) {
 }
 
 func runCompose(args ...string) (string, error) {
+	if allInOne {
+		return "", fmt.Errorf("单容器模式不使用 docker compose，相关操作由内置 runner 完成")
+	}
 	if strings.TrimSpace(vpnHostDir) == "" {
 		return "", fmt.Errorf("无法自动探测宿主机部署目录，请给 homing-admin 设置 VPN_HOST_DIR")
 	}
@@ -1054,8 +1067,16 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"ok": "1"})
 }
 
+func modeName() string {
+	if allInOne {
+		return "all"
+	}
+	return "split"
+}
+
 func handleOverview(w http.ResponseWriter, r *http.Request) {
 	out := map[string]interface{}{}
+	out["mode"] = modeName()
 	stun, stunErr := fetchStunStatus()
 	if stunErr != nil {
 		out["stunError"] = stunErr.Error()
@@ -2132,7 +2153,7 @@ func handleConnectSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetNetwork(w http.ResponseWriter, r *http.Request) {
-	out := map[string]interface{}{}
+	out := map[string]interface{}{"mode": modeName()}
 	if iface, err := readWGInterface(); err == nil {
 		out["wgPort"] = iface["port"]
 		out["mtu"] = iface["mtu"]
@@ -2179,21 +2200,23 @@ func handleSetPort(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": fmt.Sprintf("更新 隧道核心接口失败: %v %s", err, string(rb))})
 		return
 	}
-	// .env WG_PORT
-	envPath := vpnDir + "/.env"
-	if data, err := os.ReadFile(envPath); err == nil {
-		lines := strings.Split(string(data), "\n")
-		found := false
-		for i, ln := range lines {
-			if strings.HasPrefix(strings.TrimSpace(ln), "CORE_PORT=") {
-				lines[i] = fmt.Sprintf("CORE_PORT=%d", req.Port)
-				found = true
+	// .env 只在分容器模式维护；单容器模式没有部署目录。
+	if !allInOne {
+		envPath := vpnDir + "/.env"
+		if data, err := os.ReadFile(envPath); err == nil {
+			lines := strings.Split(string(data), "\n")
+			found := false
+			for i, ln := range lines {
+				if strings.HasPrefix(strings.TrimSpace(ln), "CORE_PORT=") {
+					lines[i] = fmt.Sprintf("CORE_PORT=%d", req.Port)
+					found = true
+				}
 			}
+			if !found {
+				lines = append(lines, fmt.Sprintf("CORE_PORT=%d", req.Port))
+			}
+			_ = os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0o600)
 		}
-		if !found {
-			lines = append(lines, fmt.Sprintf("CORE_PORT=%d", req.Port))
-		}
-		_ = os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0o600)
 	}
 	// STUN 配置 target（同时决定 IPv6 直连端口）
 	if data, err := os.ReadFile(stunCfgPath); err == nil {
@@ -2204,7 +2227,20 @@ func handleSetPort(w http.ResponseWriter, r *http.Request) {
 			_ = os.WriteFile(stunCfgPath, nb, 0o600)
 		}
 	}
-	// 重建 隧道核心（端口映射变化，必须 recreate）
+	if allInOne {
+		// 单容器：core 端口由 core API 热更新；把端口写给 stun runner，它会重启 stun。
+		if err := os.WriteFile(corePortPath, []byte(fmt.Sprintf("%d\n", req.Port)), 0o644); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "端口已更新，但写入 /data/core-port 失败：" + err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{
+			"ok": true, "port": req.Port,
+			"v6Endpoint": fmt.Sprintf("[<v6>]:%d", req.Port),
+			"message":    "端口已更新，内置打洞进程会自动重启",
+		})
+		return
+	}
+	// 分容器模式：重建 隧道核心（端口是容器启动参数）
 	out, err := runCompose("up", "-d", "--force-recreate", "--no-deps", "homing-core")
 	msg := out
 	if err != nil {
@@ -2234,6 +2270,7 @@ func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			"defaultPassword": defaultPasswordActive(),
 			"vpnHostDir":      vpnHostDir,
 			"dataDir":         dataDir,
+			"mode":            modeName(),
 		}
 		if iface, err := readWGInterface(); err == nil {
 			out["core"] = iface
@@ -2322,15 +2359,19 @@ func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 4) 打洞端口变化：重建 homing-stun（stun 启动时读 settings.json）
+		// 4) 打洞端口变化：分容器模式重建 homing-stun；单容器模式由 stun runner 自动重启。
 		if req.StunPort != old.StunPort {
-			out, err := runCompose("up", "-d", "--force-recreate", "--no-deps", "homing-stun")
-			if err != nil {
-				writeJSON(w, 500, map[string]interface{}{
-					"error": "设置已保存，但重建打洞容器失败：" + err.Error(),
-					"log":   truncateMsg(out),
-				})
-				return
+			if allInOne {
+				msgs = append(msgs, "打洞端口已保存，内置打洞进程会自动重启")
+			} else {
+				out, err := runCompose("up", "-d", "--force-recreate", "--no-deps", "homing-stun")
+				if err != nil {
+					writeJSON(w, 500, map[string]interface{}{
+						"error": "设置已保存，但重建打洞容器失败：" + err.Error(),
+						"log":   truncateMsg(out),
+					})
+					return
+				}
 			}
 			if req.StunPort == 0 {
 				msgs = append(msgs, "打洞端口已改为随机，正在重新发现公网端点")
@@ -2796,6 +2837,7 @@ func egressTunReady(tun string) bool {
 }
 
 type egressFileStatus struct {
+	Enabled   int    `json:"enabled"`
 	Applied   bool   `json:"applied"`
 	Mode      string `json:"mode"`
 	DNSPort   int    `json:"dnsPort"`
@@ -2816,17 +2858,56 @@ func readEgressStatusFile() egressFileStatus {
 	return st
 }
 
+type proxyRunStatus struct {
+	Running   bool   `json:"running"`
+	PID       int    `json:"pid"`
+	Tun       string `json:"tun"`
+	UpdatedAt string `json:"updatedAt"`
+	Message   string `json:"message"`
+}
+
+func readProxyStatus() proxyRunStatus {
+	var st proxyRunStatus
+	b, err := os.ReadFile(proxyStatusPath)
+	if err != nil {
+		return st
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return proxyRunStatus{}
+	}
+	return st
+}
+
 func egressStatus(cfg egressConfig) egressRuntimeStatus {
 	st := readEgressStatusFile()
 	container := egressContainerStatus()
 	proxyContainer := ""
-	if cfg.Mode == "remote" {
-		proxyContainer = containerStatus("homing-proxy")
-	}
-	// 容器不在运行时，不要相信上次残留的 applied 状态
-	if container != "running" || (cfg.Mode == "remote" && proxyContainer != "running") {
-		st.Applied = false
-		st.Clients = 0
+	if allInOne {
+		// 单容器没有 docker 容器可查：出口进程是否在跑由配置决定，
+		// remote 代理看 proxy runner 写的状态文件。
+		container = "exited"
+		if cfg.Enabled {
+			container = "running"
+		}
+		if cfg.Mode == "remote" {
+			proxyContainer = "exited"
+			if readProxyStatus().Running {
+				proxyContainer = "running"
+			}
+		}
+		if !cfg.Enabled || (cfg.Mode == "remote" && proxyContainer != "running") {
+			st.Applied = false
+			st.Clients = 0
+		}
+	} else {
+		if cfg.Mode == "remote" {
+			proxyContainer = containerStatus("homing-proxy")
+		}
+		// 容器不在运行时，不要相信上次残留的 applied 状态
+		if container != "running" || (cfg.Mode == "remote" && proxyContainer != "running") {
+			st.Applied = false
+			st.Clients = 0
+		}
 	}
 	if st.UpdatedAt == "" && cfg.UpdatedAt != "" {
 		st.UpdatedAt = cfg.UpdatedAt
@@ -2846,6 +2927,40 @@ func egressStatus(cfg egressConfig) egressRuntimeStatus {
 		Clients:        st.Clients,
 		UpdatedAt:      st.UpdatedAt,
 		Message:        st.Message,
+	}
+}
+
+// waitAllInOneProxy 等 proxy runner 把 mihomo 拉起来、TUN 就绪。
+func waitAllInOneProxy(tun string, timeout time.Duration) (bool, string) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ps := readProxyStatus()
+		if ps.Running && egressTunReady(tun) {
+			return true, ""
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	ps := readProxyStatus()
+	msg := ps.Message
+	if msg == "" {
+		msg = "本机代理未就绪"
+	}
+	return false, msg
+}
+
+// waitAllInOneEgress 等内置 plumber 把 egress-status.json 更新到目标开关状态。
+// plumber 每 10 秒一轮，配置变化后 plumb runner 还会重启它，所以最多等十几秒。
+func waitAllInOneEgress(enabled bool, timeout time.Duration) {
+	want := 0
+	if enabled {
+		want = 1
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if readEgressStatusFile().Enabled == want {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -2919,6 +3034,25 @@ func handleEgress(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		refreshEgressClients()
+		if allInOne {
+			// 单容器：没有 compose 可调，配置已落盘，由 plumber / proxy runner 生效。
+			if req.Enabled && req.Mode == "remote" {
+				if ok, msg := waitAllInOneProxy(req.Tun, 12*time.Second); !ok {
+					req.Enabled = false
+					_ = saveEgressConfig(req)
+					writeJSON(w, 502, map[string]string{"error": "启动内置代理失败：" + msg})
+					return
+				}
+			} else if req.Enabled {
+				// 本机 TUN 模式：TUN 由宿主机代理提供，plumber 会持续等待，不阻塞保存。
+				waitEgressTun(req.Tun, 5*time.Second)
+			}
+			waitAllInOneEgress(req.Enabled, 15*time.Second)
+			time.Sleep(300 * time.Millisecond)
+			cfg := loadEgressConfig()
+			writeJSON(w, 200, map[string]interface{}{"ok": true, "config": cfg, "status": egressStatus(cfg)})
+			return
+		}
 		if req.Enabled {
 			if req.Mode == "remote" {
 				// 先起本机代理，TUN 出现后 plumber 才会应用策略路由

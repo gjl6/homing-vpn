@@ -5,10 +5,15 @@
 #   homing admin [gateway-admin 参数]
 #   homing plumb          # 策略路由
 #   homing proxy          # remote 出口的本机透明代理（mihomo）
+#   homing all            # 单容器模式：runit 监督以上全部子进程
 # 其它情况直接 exec 传入命令，方便 docker run --entrypoint 调试。
 set -e
 
 case "$1" in
+  all)
+    shift
+    exec /usr/local/bin/homing-init "$@"
+    ;;
   core)
     shift
     exec /usr/local/bin/homing-core "$@"

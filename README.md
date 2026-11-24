@@ -121,7 +121,8 @@ docker compose up -d                 # 本地源码构建用：docker compose up
 - 隧道客户端网段 `10.8.0.0/24`；
 - 打洞端口默认随机（可在管理台随时更换）。
 
-> 管理台需要挂载 `docker.sock` 和部署目录来在线重建容器；部署路径会通过 compose 标签自动探测，不再需要手工设置 `VPN_HOST_DIR`。
+> 多容器模式的管理台需要挂载 `docker.sock` 和部署目录来在线重建容器；部署路径会通过 compose 标签自动探测，不再需要手工设置 `VPN_HOST_DIR`。
+> 如果只想部署一个容器，用下面的「单容器模式」，它不挂 `docker.sock`。
 > 数据目录统一为 `./data`，可用 `HOMING_DATA_DIR` 覆盖。
 > 构建时会额外拉取一个代理内核基础镜像（仅用于可选的远程代理出口），离线环境可先 `docker pull`；访问不了 `proxy.golang.org` 时在 `.env` 加 `GO_PROXY=https://goproxy.cn,direct`。
 
@@ -139,6 +140,32 @@ docker compose up -d                 # 本地源码构建用：docker compose up
 - 打洞端口默认随机，CGNAT / 无公网 IP 场景是出站流量，**不需要**在路由器放行；有公网 IP + 端口映射时，可在管理台把打洞端口改成固定值再映射；
 - 仅内网：`TCP 51822`（管理台）、`TCP 18081`（自检页，可选）；
 - 不要暴露：`51821` / `51831`（只监听本机）。
+
+### 单容器模式（可选）
+
+适合 NAS / 只想在 Docker 里看到一个容器的场景：
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.single.yml up -d --build
+```
+
+一个容器里由 `tini + runit` 监督 core / stun / admin / plumb / proxy 五个子进程，仍然使用 host 网络和同一个 `./data`：
+
+- 管理台**不挂 `docker.sock`**，也不挂部署目录；
+- 改隧道端口、打洞端口、启用/停用出口都由管理台写配置文件，内置 runner 自动重启对应进程；
+- 优点是部署简单、权限面小；代价是升级/重启会同时影响全部角色（通常只断几秒）；
+- 需要 `privileged: true`（写宿主机 `/proc/sys` 和 iptables），core 权限收紧是后续工作。
+
+日常运维命令：
+
+```bash
+docker compose -f docker-compose.single.yml ps
+docker compose -f docker-compose.single.yml logs -f --tail=100
+docker compose -f docker-compose.single.yml up -d --build      # 升级/重建
+docker exec homing sv status /etc/homing/services/*            # 看子进程状态
+docker exec homing sv restart /etc/homing/services/admin       # 单独重启某个子进程
+```
 
 ## 配置项（.env，全部可选）
 

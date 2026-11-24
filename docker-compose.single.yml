@@ -1,0 +1,58 @@
+# 归途（Homing）单容器模式
+#
+# 一个容器、一个 /data 卷、host 网络；容器内由 tini + runit 监督：
+#   core（隧道核心） / stun（打洞） / admin（管理台） / plumb（出口策略路由） / proxy（远程出口）
+#
+# 与多容器 docker-compose.yml 的区别：
+#   - 管理台不再挂 docker.sock，也不再挂部署目录；
+#   - 出口/端口等“重建容器”的动作改为写配置文件，由内置 runner 生效；
+#   - 升级/重启会同时影响全部角色（只断几秒，客户端会自动重连）。
+#
+# 用法：
+#   cp .env.example .env     # 可选
+#   docker compose -f docker-compose.single.yml up -d --build
+#
+# 说明：单容器仍需要 privileged 来写宿主机 /proc/sys 和 iptables；
+# core 的权限收紧是下一步工作。管理台/打洞进程会通过 capsh 清空 capabilities。
+
+services:
+  homing:
+    image: ${HOMING_IMAGE_PREFIX:-}homing:${HOMING_VERSION:-local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${HOMING_VERSION:-local}
+        GOPROXY: ${GO_PROXY:-https://proxy.golang.org,direct}
+    container_name: homing
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    command: ["all"]
+    environment:
+      HOMING_MODE: all
+      DATA_DIR: /data
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      ADMIN_LISTEN: "${ADMIN_LISTEN:-:51822}"
+      CORE_PORT: "${CORE_PORT:-51820}"
+      CORE_DNS: "${CORE_DNS:-}"
+      CORE_LAN: "${CORE_LAN:-}"
+      CLIENT_NET: "${CLIENT_NET:-}"
+      PROBE_PORT: "${PROBE_PORT:-51824}"
+      STUN_PORT: "${STUN_PORT:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ${HOMING_DATA_DIR:-./data}:/data
+      - /lib/modules:/lib/modules:ro
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/homing-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,13 @@
+#!/bin/sh
+# core：隧道核心，需要 privileged 容器里的 capabilities。
+set -eu
+DATA="${DATA_DIR:-/data}"
+exec /usr/local/bin/homing-core \
+  -api "${CORE_API_ADDR:-127.0.0.1:51821}" \
+  -data "$DATA/core.json" \
+  -iface "${CORE_IFACE:-homing0}" \
+  -port "${CORE_PORT:-51820}" \
+  -dns "${CORE_DNS:-}" \
+  -v4cidr "${CLIENT_NET:-}" \
+  -reconcile "${CORE_RECONCILE:-10s}" \
+  -probe-port "${PROBE_PORT:-51824}"

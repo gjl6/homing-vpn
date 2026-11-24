@@ -1,0 +1,4 @@
+#!/bin/sh
+# proxy：remote 出口的本机透明代理 runner；按 /data/egress.json 启停 mihomo。
+set -eu
+exec /usr/local/bin/homing-proxy-runner
