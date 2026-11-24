@@ -768,7 +768,7 @@ details.more .more-body{margin-top:7px;font-size:11.5px;line-height:1.7;color:va
               </div>
               <details class="more">
                 <summary>说明</summary>
-                <div class="more-body">本机 TUN：把开启代理出口的客户端 IPv4 流量策略路由到宿主机已有的 mihomo TUN。远程代理：本机启动透明代理，再把连接转给远端 HTTP/SOCKS5 端口，适合 mihomo 在另一台主机。「客户端」页有两列开关：「代理出口」是实际状态，「自助」是允许该客户端在 App 里自己切换；管理员可随时改这两列。IPv6 始终直连。两种模式都需要 host 网络 + privileged。</div>
+                <div class="more-body">本机 TUN：把开启代理出口的客户端 IPv4 流量策略路由到宿主机已有的 mihomo TUN。远程代理：本机启动透明代理，再把连接转给远端 HTTP/SOCKS5 端口，适合 mihomo 在另一台主机。「客户端」页有两列开关：「代理出口」是实际状态，「自助」是允许该客户端在 App 里自己切换；管理员可随时改这两列。IPv6 始终直连。两种模式都需要 host 网络；远程代理还需要 `/dev/net/tun`（单容器部署时镜像会尝试自动创建，需容器保留 MKNOD 能力）。</div>
               </details>
             </div>
           </div>

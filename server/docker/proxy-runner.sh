@@ -53,6 +53,12 @@ last_sig=""
 write_status false "等待配置"
 while :; do
   if want_proxy; then
+    if [ ! -e /dev/net/tun ]; then
+      log "缺少 /dev/net/tun：远程代理出口需要该设备（给容器加设备 /dev/net/tun，或保留 MKNOD 能力）"
+      write_status false "缺少 /dev/net/tun：请给容器加设备 /dev/net/tun（或 MKNOD 能力）"
+      sleep 2
+      continue
+    fi
     cur_sig="$(conf_sig)"
     if [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null || [ "$cur_sig" != "$last_sig" ]; then
       stop_child

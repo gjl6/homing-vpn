@@ -14,6 +14,19 @@ export HOMING_MODE=all
 
 log() { printf '[homing-init] %s\n' "$*"; }
 
+# 远程代理出口的 mihomo TUN 需要 /dev/net/tun：
+# - compose 部署用 devices 映射，设备节点由 Docker 提供；
+# - NAS 图形界面一般没有“设备”栏，但默认能力里带 MKNOD，这里兜底创建一次。
+if [ ! -e /dev/net/tun ]; then
+  mkdir -p /dev/net 2>/dev/null || true
+  if mknod /dev/net/tun c 10 200 2>/dev/null; then
+    chmod 666 /dev/net/tun 2>/dev/null || true
+    log "已创建 /dev/net/tun（远程代理出口可用）"
+  else
+    log "未找到 /dev/net/tun 且无权创建：远程代理出口不可用；请加设备 /dev/net/tun 或 MKNOD 能力"
+  fi
+fi
+
 if ! mkdir -p "$DATA/stun" "$DATA/proxy" 2>/dev/null; then
   log "无法写入数据目录 $DATA（当前 uid=$(id -u)）；请检查映射目录权限"
   exit 1
