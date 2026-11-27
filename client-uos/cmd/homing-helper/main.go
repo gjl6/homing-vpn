@@ -33,7 +33,7 @@ import (
 	"homing/client/internal/tunnel"
 )
 
-const version = "2.1.0"
+const version = "2.1.1"
 
 func main() {
 	tunnel.SetVersion(version)

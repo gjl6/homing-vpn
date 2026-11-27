@@ -74,6 +74,7 @@ class HomingService : Service(), Tunnel {
     private var suspectAt = 0L
     private var suspectDeadline = 0L
     private var lastTxtQueryAt = 0L
+    private var v6MismatchAt = 0L
 
     @Volatile private var destroyed = false
     @Volatile private var foreground = false
@@ -256,6 +257,11 @@ class HomingService : Service(), Tunnel {
                 },
             )
 
+            val epNow = HomingState.endpoint
+            if (epNow.isNotBlank() && TxtResolver.isIPv6Endpoint(epNow) && !TxtResolver.deviceHasGlobalV6(this)) {
+                HomingState.log("当前配置端点是 IPv6（$epNow），但本机没有公网 IPv6；连接后会尝试切到公告板里的 v4 端点")
+            }
+
             if (VpnService.prepare(this) != null) {
                 return failConnect("缺少 VPN 授权：请打开应用点一次「连接」并在系统弹窗里允许")
             }
@@ -393,6 +399,7 @@ class HomingService : Service(), Tunnel {
         updateTrafficProgress(now)
         updateProbeMode(now)
         maybeScheduleProbe(now)
+        forceV4WhenNoLocalV6(now)
         val healthy = tunnelHealthy(now, state)
         if (healthy) onHealthy(now) else onUnhealthy(now)
         val title = when {
@@ -402,8 +409,30 @@ class HomingService : Service(), Tunnel {
         updateNotification(title, notificationText())
     }
 
-    private fun notificationText(): String {
-        val sb = StringBuilder()
+    /**
+     * 当前端点是 IPv6、但本机没有公网 IPv6：主动查公告板切到 v4，
+     * 别死等“公告板端点没变”的软恢复流程。
+     */
+    private fun forceV4WhenNoLocalV6(now: Long) {
+        if (destroyed || !wantConnected || cfg == null) return
+        if (probe != null) return // 正在验证候选端点，交给验证流程
+        val ep = HomingState.endpoint
+        if (ep.isBlank() || !TxtResolver.isIPv6Endpoint(ep)) return
+        if (!HomingState.recovering && suspectStage == 0) {
+            // 健康时不频繁动配置：30s 最多检查/切换一次
+            if (now - v6MismatchAt < 30_000L) return
+        }
+        if (TxtResolver.deviceHasGlobalV6(this)) return
+        v6MismatchAt = now
+        if (profileObject == null) {
+            HomingState.log("当前端点是 IPv6（$ep），但本机没有公网 IPv6；当前是 .conf 配置，请手动换成 v4 端点")
+            return
+        }
+        HomingState.log("当前端点是 IPv6（$ep），但本机没有公网 IPv6，主动查找 v4 端点")
+        doDiscovery(apply = true, source = "v6-mismatch", force = true)
+    }
+
+    private fun notificationText(): String {        val sb = StringBuilder()
         sb.append("Endpoint ").append(HomingState.endpoint.ifBlank { "未知" })
         val ago = HomingState.handshakeAgoSec()
         sb.append(" · 握手 ").append(if (ago >= 0) "${ago}s 前" else "等待中")
@@ -639,7 +668,11 @@ class HomingService : Service(), Tunnel {
             append("（").append(result.server).append("）")
         }
         val current = currentEndpoint()
-        val chosen = TxtResolver.choose(d, result, TxtResolver.deviceHasGlobalV6(this))
+        val hasV6 = TxtResolver.deviceHasGlobalV6(this)
+        val chosen = TxtResolver.choose(d, result, hasV6)
+        if (chosen.isBlank() && !hasV6) {
+            HomingState.log("本机没有公网 IPv6，公告板也没有可用的 v4 端点，无法自动恢复")
+        }
         if (chosen.isNotBlank() && chosen != current) {
             HomingState.log("公告板端点已变：${current ?: "-"} → $chosen，切换并验证")
             clearSuspect()
@@ -799,13 +832,13 @@ class HomingService : Service(), Tunnel {
         current: String?,
         now: Long,
     ): String? {
+        val hasV6 = TxtResolver.deviceHasGlobalV6(this)
         val ordered = mutableListOf<String>()
         if (d != null && r != null && r.ok) {
-            val hasV6 = TxtResolver.deviceHasGlobalV6(this)
             val chosen = TxtResolver.choose(d, r, hasV6)
             if (chosen.isNotBlank()) ordered.add(chosen)
             if (r.v4.isNotBlank() && TxtResolver.familyAllowed(d, "v4")) ordered.add(r.v4)
-            if (r.v6.isNotBlank() && TxtResolver.familyAllowed(d, "v6")) ordered.add(r.v6)
+            if (r.v6.isNotBlank() && hasV6 && TxtResolver.familyAllowed(d, "v6")) ordered.add(r.v6)
         }
         profileObject?.let { prof ->
             ordered.addAll(HomingProfile.alternatives(prof, current))
@@ -814,7 +847,10 @@ class HomingService : Service(), Tunnel {
         current?.let { ordered.add(it) }
 
         val seen = HashSet<String>()
-        val uniq = ordered.map { it.trim() }.filter { it.isNotBlank() && seen.add(it) }
+        val uniq = ordered.map { it.trim() }
+            .filter { it.isNotBlank() && seen.add(it) }
+            // 本机没有公网 IPv6 时，任何来源的 v6 候选都不要，否则会切过去再失败
+            .filter { hasV6 || !TxtResolver.isIPv6Endpoint(it) }
         val usable = uniq.filter { (avoidUntil[it] ?: 0L) <= now }
         if (usable.isNotEmpty()) return usable.first()
         // 所有端点都在回避期：挑最早解除的再试，否则永远恢复不了

@@ -57,6 +57,12 @@ type Runner struct {
 	lastNoHandshakeLog time.Time
 	lastLossLog        time.Time
 
+	// 本机 IPv6 可用性（10 秒缓存）：没有公网 IPv6 时跳过 v6 端点，
+	// 否则会一直拿 v6 端点去连、公告板又显示“端点没变”，表现为一直等待。
+	v6CheckedAt  time.Time
+	v6Usable     bool
+	lastV6WarnAt time.Time
+
 	// ---- 2.3.6 探针节流 / 疑似故障（只在主循环里读写） ----
 	probeCfg           profile.Probe
 	probeCh            chan bool
@@ -104,6 +110,23 @@ func Run(t *tunnel.Tunnel, p *profile.Profile, profileName string) error {
 	// TXT 查询用 SO_MARK 绕开隧道策略路由（否则隧道没通时 DNS 也查不到，形成死循环）
 	discovery.Mark = tunnel.Table
 	r.candidates = p.CandidateEndpoints()
+	if !r.hasLocalIPv6(now) {
+		kept := r.candidates[:0]
+		skipped := 0
+		for _, ep := range r.candidates {
+			if discovery.EndpointIsIPv6(ep) {
+				skipped++
+				continue
+			}
+			kept = append(kept, ep)
+		}
+		r.candidates = kept
+		if skipped > 0 {
+			r.event("本机没有可用的公网 IPv6：跳过 %d 个 v6 候选端点，只用 v4", skipped)
+		} else {
+			r.event("本机没有可用的公网 IPv6：只会使用 v4 端点")
+		}
+	}
 	r.connectStart = now
 	if err := tunnel.EnsureRunDir(); err != nil {
 		return err
@@ -144,6 +167,24 @@ func Run(t *tunnel.Tunnel, p *profile.Profile, profileName string) error {
 	// 首次端点发现（阻塞最多 8 秒，失败不影响隧道）
 	if p.Discovery.Enabled {
 		r.refreshDiscovery(true)
+	}
+
+	// 配置/公告板把 v6 端点排在最前，但本机没有公网 IPv6：立即切到 v4 候选，
+	// 否则隧道会一直“等握手”，探针也永远拿不到第一次成功。
+	if !r.hasLocalIPv6(time.Now()) {
+		if cur := r.currentEndpoint(); discovery.EndpointIsIPv6(cur) {
+			if alt := r.firstUsableEndpoint(cur, time.Now()); alt != "" {
+				if applied, err := r.Tunnel.SetEndpoint(alt, 0); err == nil {
+					r.event("当前端点是 IPv6（%s），但本机没有可用的公网 IPv6，已立即切换 v4 端点 %s", cur, applied)
+					r.afterEndpointSwitch(applied)
+				} else {
+					r.event("切换到 v4 端点 %s 失败: %v", alt, err)
+				}
+			} else if time.Since(r.lastV6WarnAt) > 30*time.Second {
+				r.lastV6WarnAt = time.Now()
+				r.event("当前端点是 IPv6（%s），但本机没有公网 IPv6，配置里也没有 v4 候选；请重新导出 v4 配置或换到有 IPv6 的网络", cur)
+			}
+		}
 	}
 
 	statusTicker := time.NewTicker(2 * time.Second)
@@ -378,6 +419,23 @@ func (r *Runner) clearSuspect() {
 
 // checkHealth 2.3.6：探针优先；探针不可用时退回握手 180s + 候选轮换。
 func (r *Runner) checkHealth(st *tunnel.Status, now time.Time) {
+	// 本机没有公网 IPv6、当前却是 v6 端点：不要死等握手/公告板“端点没变”，直接切 v4。
+	if !r.hasLocalIPv6(now) && discovery.EndpointIsIPv6(st.Endpoint) {
+		if now.Sub(r.lastRotate) >= 10*time.Second {
+			if alt := r.firstUsableEndpoint(st.Endpoint, now); alt != "" {
+				applied, err := r.Tunnel.SetEndpoint(alt, 0)
+				if err == nil {
+					r.event("当前端点是 IPv6（%s），但本机没有公网 IPv6，切换 v4 端点 %s", st.Endpoint, applied)
+					r.afterEndpointSwitch(applied)
+					return
+				}
+				r.event("切换到 v4 端点 %s 失败: %v", alt, err)
+			} else if now.Sub(r.lastV6WarnAt) > 30*time.Second {
+				r.lastV6WarnAt = now
+				r.event("当前只有 IPv6 端点，本机没有公网 IPv6，无法连接；请重新导出 v4 配置或换到有 IPv6 的网络")
+			}
+		}
+	}
 	if r.probeCfg.Enabled && r.probeEverSucceeded {
 		if r.suspectStage > 0 {
 			r.advanceSuspect(st, now)
@@ -408,6 +466,11 @@ func (r *Runner) checkHealth(st *tunnel.Status, now time.Time) {
 // checkRotationFallback 一直握手不上时依次尝试候选端点（原 checkRotation 逻辑）。
 func (r *Runner) checkRotationFallback(st *tunnel.Status) {
 	if len(r.candidates) < 2 {
+		if !r.hasLocalIPv6(time.Now()) && discovery.EndpointIsIPv6(st.Endpoint) &&
+			time.Since(r.lastV6WarnAt) > 30*time.Second {
+			r.lastV6WarnAt = time.Now()
+			r.event("当前配置只有 IPv6 端点，本机没有公网 IPv6，无法连接；请重新导出 v4 配置或换到有 IPv6 的网络")
+		}
 		return
 	}
 	if st.HandshakeAgeSeconds >= 0 && st.HandshakeAgeSeconds < 120 {
@@ -526,6 +589,23 @@ func (r *Runner) queryDiscoveryForSuspect(now time.Time) {
 		r.clearSuspect()
 		return
 	}
+	// 公告板没变，但本机没有公网 IPv6、当前又停在 v6 端点：公告板里的 v6 对本机不可用，
+	// 直接切 v4 候选，别陪着“端点未变”一直等。
+	if !r.hasLocalIPv6(now) {
+		if cur := r.currentEndpoint(); discovery.EndpointIsIPv6(cur) {
+			if alt := r.firstUsableEndpoint(cur, now); alt != "" {
+				if applied, err := r.Tunnel.SetEndpoint(alt, 0); err == nil {
+					r.event("公告板端点未变，但本机没有公网 IPv6，切换 v4 候选端点 %s", applied)
+					r.clearSuspect()
+					r.afterEndpointSwitch(applied)
+					return
+				}
+			} else if now.Sub(r.lastV6WarnAt) > 30*time.Second {
+				r.lastV6WarnAt = now
+				r.event("公告板端点未变；当前是 v6 端点但本机没有公网 IPv6，且没有 v4 候选，无法恢复")
+			}
+		}
+	}
 	r.event("公告板端点未变，继续快探 %ds（%ds 内恢复则不重建）",
 		r.probeCfg.RecoveryInterval, r.probeCfg.SoftGrace)
 }
@@ -600,10 +680,37 @@ func (r *Runner) checkHandshake() {
 
 // ---------------- 工具 ----------------
 
-// addCandidate 把发现到的端点并入候选列表（去重）。
+// hasLocalIPv6 判断本机是否有可用的公网 IPv6（10 秒缓存，避免每 2 秒扫一遍网卡）。
+func (r *Runner) hasLocalIPv6(now time.Time) bool {
+	if r.v6CheckedAt.IsZero() || now.Sub(r.v6CheckedAt) > 10*time.Second {
+		r.v6CheckedAt = now
+		r.v6Usable = discovery.HasGlobalIPv6()
+	}
+	return r.v6Usable
+}
+
+// firstUsableEndpoint 从候选里挑一个不是当前端点、且本机可用的端点。
+func (r *Runner) firstUsableEndpoint(current string, now time.Time) string {
+	hasV6 := r.hasLocalIPv6(now)
+	for _, c := range r.candidates {
+		if c == "" || c == current {
+			continue
+		}
+		if !hasV6 && discovery.EndpointIsIPv6(c) {
+			continue
+		}
+		return c
+	}
+	return ""
+}
+
+// addCandidate 把发现到的端点并入候选列表（去重）；本机没有 IPv6 时不收 v6 端点。
 func (r *Runner) addCandidate(endpoint string) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
+		return
+	}
+	if discovery.EndpointIsIPv6(endpoint) && !r.hasLocalIPv6(time.Now()) {
 		return
 	}
 	for _, c := range r.candidates {

@@ -26,8 +26,8 @@ android {
         applicationId = "io.homing.client"
         minSdk = 24
         targetSdk = 34
-        versionCode = 32
-        versionName = "2.4.0"
+        versionCode = 33
+        versionName = "2.4.1"
     }
     signingConfigs {
         // 只在配置存在时创建 release 签名；没有 keystore.properties 时 release 不签名。

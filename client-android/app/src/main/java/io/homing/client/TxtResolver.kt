@@ -204,21 +204,35 @@ object TxtResolver {
         return if (ok && (v4.isNotEmpty() || v6.isNotEmpty())) Triple(v4, v6, ts) else null
     }
 
-    /** 按用户偏好选一个可用端点：auto / v4 / v6 / v4,v6 / v6,v4 / v4-only / v6-only。 */
+    /**
+     * 按用户偏好选一个可用端点：auto / v4 / v6 / v4,v6 / v6,v4 / v4-only / v6-only。
+     * 本机没有公网 IPv6 时，即使偏好写了 v6 / v6,v4 也会跳过 v6 退回 v4，
+     * 否则客户端会一直拿 v6 端点去连、公告板又显示“端点没变”，表现为一直等待。
+     */
     fun choose(d: HomingProfile.Discovery, r: Result, hasV6: Boolean): String {
         val pref = d.preferred.trim().lowercase()
         if (pref == "v4-only") return r.v4
-        if (pref == "v6-only") return r.v6
+        if (pref == "v6-only") return if (hasV6) r.v6 else ""
         val order = when (pref) {
             "v4", "v4,v6" -> listOf("v4", "v6")
             "v6", "v6,v4" -> listOf("v6", "v4")
             else -> if (hasV6) listOf("v6", "v4") else listOf("v4", "v6")
         }
         for (fam in order) {
+            if (fam == "v6" && !hasV6) continue
             val v = if (fam == "v4") r.v4 else r.v6
             if (v.isNotBlank()) return v
         }
         return ""
+    }
+
+    /** 端点是否是 IPv6 字面量（域名 / 主机名返回 false）。 */
+    fun isIPv6Endpoint(endpoint: String): Boolean {
+        val s = endpoint.trim()
+        if (s.isEmpty()) return false
+        val host = if (s.startsWith("[")) s.substringAfter("[").substringBefore("]")
+        else s.substringBeforeLast(":")
+        return host.contains(":")
     }
 
     /** 当前偏好是否允许某个协议（仅 IPv4/仅 IPv6 用于过滤公告板里的另一协议）。 */

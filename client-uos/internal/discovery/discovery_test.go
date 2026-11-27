@@ -67,7 +67,15 @@ func TestParseTXT(t *testing.T) {
 	}
 }
 
+func withLocalIPv6(t *testing.T, ok bool) {
+	t.Helper()
+	old := hasGlobalIPv6
+	hasGlobalIPv6 = func() bool { return ok }
+	t.Cleanup(func() { hasGlobalIPv6 = old })
+}
+
 func TestChooseAndAlternate(t *testing.T) {
+	withLocalIPv6(t, true)
 	r := Result{V4: "1.2.3.4:5", V6: "[2001:db8::1]:6"}
 
 	p4 := &profile.Profile{Discovery: profile.Discovery{Preferred: "v4"}}
@@ -93,6 +101,7 @@ func TestChooseAndAlternate(t *testing.T) {
 }
 
 func TestChoosePriority(t *testing.T) {
+	withLocalIPv6(t, true)
 	r := Result{V4: "1.2.3.4:5", V6: "[2001:db8::1]:6"}
 	cases := []struct {
 		pref string
@@ -118,5 +127,57 @@ func TestChoosePriority(t *testing.T) {
 	p = &profile.Profile{Discovery: profile.Discovery{Preferred: "v6-only"}}
 	if got := Alternate(p, r, r.V6); got != "" {
 		t.Errorf("v6-only alternate 应只剩 v6，实际 %q", got)
+	}
+}
+
+// 本机没有公网 IPv6 时：v6 偏好必须自动退回 v4，不能一直拿 v6 端点去连。
+func TestChooseWithoutLocalIPv6(t *testing.T) {
+	withLocalIPv6(t, false)
+	r := Result{V4: "1.2.3.4:5", V6: "[2001:db8::1]:6"}
+
+	for _, pref := range []string{"v6", "v6,v4", "auto", "v4,v6"} {
+		p := &profile.Profile{Discovery: profile.Discovery{Preferred: pref}}
+		if got := Choose(p, r); got != r.V4 {
+			t.Errorf("preferred=%s 且本机无 v6 时应选 v4，实际 %q", pref, got)
+		}
+	}
+	// 显式仅 v6：没有 v6 就只能返回空，由调用方提示用户
+	p := &profile.Profile{Discovery: profile.Discovery{Preferred: "v6-only"}}
+	if got := Choose(p, r); got != "" {
+		t.Errorf("v6-only 且本机无 v6 时应返回空，实际 %q", got)
+	}
+
+	// 轮换时也不能再给出 v6
+	p = &profile.Profile{Discovery: profile.Discovery{Preferred: "v6"}}
+	if got := Alternate(p, r, r.V6); got != r.V4 {
+		t.Errorf("本机无 v6 时应轮换到 v4，实际 %q", got)
+	}
+	if got := Alternate(p, r, r.V4); got != "" {
+		t.Errorf("本机无 v6 且当前已是 v4 时不应再给候选，实际 %q", got)
+	}
+
+	// 只有 v6 公告：返回空，调用方会提示“本机没有 IPv6”
+	only6 := Result{V6: "[2001:db8::1]:6"}
+	p = &profile.Profile{Discovery: profile.Discovery{Preferred: "v6,v4"}}
+	if got := Choose(p, only6); got != "" {
+		t.Errorf("只有 v6 公告且本机无 v6 时应返回空，实际 %q", got)
+	}
+}
+
+func TestEndpointIsIPv6(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"[2001:db8::1]:51820", true},
+		{"fd00::1", true}, // 无端口时按裸 IPv6 处理
+		{"1.2.3.4:51820", false},
+		{"vpn.example.com:51820", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := EndpointIsIPv6(c.in); got != c.want {
+			t.Errorf("EndpointIsIPv6(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }

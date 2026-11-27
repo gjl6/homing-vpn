@@ -174,17 +174,26 @@ func ParseTXT(txt string) (v4, v6, ts string, ok bool) {
 	return v4, v6, ts, ok
 }
 
+// hasGlobalIPv6 判断本机是否有可用的公网 IPv6；抽成变量方便测试替换。
+var hasGlobalIPv6 = HasGlobalIPv6
+
 // Choose 按用户偏好挑一个可用端点：
 // auto | v4 | v6 | v4,v6 | v6,v4 | v4-only | v6-only。
+// 本机没有公网 IPv6 时，即使偏好写了 v6 / v6,v4，也会跳过 v6 退回 v4，
+// 否则客户端会一直拿 v6 端点去连、永远等不到握手。
 func Choose(p *profile.Profile, r Result) string {
+	hasV6 := hasGlobalIPv6()
 	pref := strings.ToLower(strings.TrimSpace(p.Discovery.Preferred))
 	switch pref {
 	case "v4-only":
 		return r.V4
 	case "v6-only":
+		if !hasV6 {
+			return ""
+		}
 		return r.V6
 	}
-	order := []string{"v6", "v4"}
+	var order []string
 	switch pref {
 	case "v4", "v4,v6":
 		order = []string{"v4", "v6"}
@@ -192,11 +201,16 @@ func Choose(p *profile.Profile, r Result) string {
 		order = []string{"v6", "v4"}
 	default:
 		// auto：本机有全局 IPv6 才优先 v6
-		if !HasGlobalIPv6() {
+		if hasV6 {
+			order = []string{"v6", "v4"}
+		} else {
 			order = []string{"v4", "v6"}
 		}
 	}
 	for _, fam := range order {
+		if fam == "v6" && !hasV6 {
+			continue
+		}
 		if fam == "v4" && r.V4 != "" {
 			return r.V4
 		}
@@ -206,6 +220,7 @@ func Choose(p *profile.Profile, r Result) string {
 	}
 	return ""
 }
+
 
 // familyAllowed 判断当前偏好是否允许某个协议（仅 IPv4/仅 IPv6 用来过滤另一协议）。
 func familyAllowed(p *profile.Profile, fam string) bool {
@@ -219,13 +234,15 @@ func familyAllowed(p *profile.Profile, fam string) bool {
 }
 
 // Alternate 给出“除了当前端点以外的另一个候选”，用于握手长期失败时轮换。
+// 本机没有公网 IPv6 时不会再把 v6 端点当作轮换候选。
 func Alternate(p *profile.Profile, r Result, current string) string {
+	hasV6 := hasGlobalIPv6()
 	var candidates []string
 	candidates = append(candidates, Choose(p, r))
 	if familyAllowed(p, "v4") {
 		candidates = append(candidates, r.V4)
 	}
-	if familyAllowed(p, "v6") {
+	if hasV6 && familyAllowed(p, "v6") {
 		candidates = append(candidates, r.V6)
 	}
 	for _, c := range candidates {
@@ -234,6 +251,21 @@ func Alternate(p *profile.Profile, r Result, current string) string {
 		}
 	}
 	return ""
+}
+
+// EndpointIsIPv6 判断端点是否是 IPv6 字面量（域名 / 主机名返回 false）。
+func EndpointIsIPv6(endpoint string) bool {
+	host := strings.TrimSpace(endpoint)
+	if host == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
 }
 
 // HasGlobalIPv6 判断本机是否有可用的全局 IPv6 地址（排除 ULA/link-local/回环）。
